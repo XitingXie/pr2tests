@@ -12,3 +12,10 @@ source:
 llm:
   provider: anthropic
   model: claude-sonnet-4-20250514
+
+# report:
+#   trigger_mode: manual     # "manual", "daily", "count"
+#   trigger_count: 5         # for "count" mode
+#   output_dir: .apptest/reports
+#   retention: 30            # keep last N reports
+#   include_mock_tests: true

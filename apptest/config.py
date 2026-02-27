@@ -33,10 +33,20 @@ class LLMConfig:
 
 
 @dataclass
+class ReportConfig:
+    trigger_mode: str = "manual"         # "manual", "daily", "count"
+    trigger_count: int = 5               # for "count" mode
+    output_dir: str = ".apptest/reports"
+    retention: int = 30                  # keep last N reports
+    include_mock_tests: bool = True
+
+
+@dataclass
 class Config:
     app: AppConfig
     source: SourceConfig
     llm: LLMConfig = field(default_factory=LLMConfig)
+    report: ReportConfig = field(default_factory=ReportConfig)
 
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{(\w+)\}")
@@ -115,5 +125,12 @@ def load_config(config_path: str | Path) -> Config:
         llm=LLMConfig(
             provider=raw.get("llm", {}).get("provider", "anthropic"),
             model=raw.get("llm", {}).get("model", "claude-sonnet-4-20250514"),
+        ),
+        report=ReportConfig(
+            trigger_mode=raw.get("report", {}).get("trigger_mode", "manual"),
+            trigger_count=raw.get("report", {}).get("trigger_count", 5),
+            output_dir=raw.get("report", {}).get("output_dir", ".apptest/reports"),
+            retention=raw.get("report", {}).get("retention", 30),
+            include_mock_tests=raw.get("report", {}).get("include_mock_tests", True),
         ),
     )

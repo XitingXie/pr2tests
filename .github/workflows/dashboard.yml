@@ -1,0 +1,73 @@
+name: Update Test Dashboard
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 9 * * *'  # daily at 9am UTC as fallback
+  workflow_dispatch:       # manual trigger
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: dashboard
+  cancel-in-progress: false  # don't cancel — let each run complete to avoid gaps
+
+jobs:
+  update-dashboard:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history for git log
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install apptest
+        run: pip install -e .
+
+      # Restore previous reports so the index accumulates over time
+      - name: Restore report history
+        uses: actions/cache@v4
+        with:
+          path: .apptest/reports
+          key: dashboard-reports-${{ github.sha }}
+          restore-keys: dashboard-reports-
+
+      - name: Generate report
+        run: |
+          # On push: analyze the commits in this push
+          # On schedule/manual: analyze last 10 commits as a catch-up
+          if [ "${{ github.event_name }}" = "push" ]; then
+            BEFORE="${{ github.event.before }}"
+            AFTER="${{ github.event.after }}"
+
+            # Handle first push (before is all zeros)
+            if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              echo "First push — analyzing last 5 commits"
+              apptest report --mode count --count 5
+            else
+              echo "Push: analyzing $BEFORE..$AFTER"
+              apptest report --mode manual --range "${BEFORE}..${AFTER}"
+            fi
+          else
+            echo "Scheduled/manual run — analyzing last 10 commits"
+            apptest report --mode count --count 10
+          fi
+
+      - name: Upload pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .apptest/reports
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

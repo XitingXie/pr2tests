@@ -1,5 +1,6 @@
 """CLI entry point for apptest."""
 
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -9,6 +10,17 @@ from .analyzer.diff_parser import parse_diff
 from .analyzer.manifest_parser import parse_manifest
 from .analyzer.profile_updater import update_profile_from_analysis
 from .config import load_config
+from .reporter.html_renderer import write_report_html
+from .reporter.report_builder import build_report, write_report_json
+from .reporter.report_collector import (
+    collect_prs_last_n,
+    collect_prs_manual,
+    collect_prs_since,
+    get_version_info,
+    update_state,
+)
+from .reporter.report_index import add_to_index
+from .reporter.report_schema import TriggerInfo
 from .scanner.profile_manager import load_effective_profile, save_profile
 from .scanner.project_scanner import scan_project
 
@@ -114,9 +126,20 @@ def analyze(diff_ref: str, repo_path: str, config_path: str, output_dir: str):
     click.echo(f"Diff: {diff_ref}")
     click.echo(f"Repo: {repo}")
 
-    # Load profile if it exists
+    # Load profile, auto-init if missing
     profile = load_effective_profile(repo)
-    if profile is not None:
+    if profile is None:
+        click.echo("  No profile found — running init automatically...")
+        scanner_config = {
+            "source_root": config.source.root,
+            "exclude_dirs": config.source.exclude_dirs,
+        }
+        auto = scan_project(repo, scanner_config)
+        profile_data = {"auto": auto}
+        save_profile(repo, profile_data)
+        profile = load_effective_profile(repo)
+        click.echo(f"  Profile created ({len(auto.get('screens', []))} screens)")
+    else:
         click.echo("  Using app profile for fast lookups")
 
     # Step 1: Parse the diff — include ALL files (classifier handles filtering)
@@ -182,3 +205,145 @@ def analyze(diff_ref: str, repo_path: str, config_path: str, output_dir: str):
             click.echo(f"  {len(screens_found)} affected screen(s):")
             for s in sorted(screens_found):
                 click.echo(f"    - {Path(s).stem}")
+
+
+@main.command()
+@click.option(
+    "--mode",
+    type=click.Choice(["manual", "daily", "count"]),
+    default=None,
+    help="Collection mode (overrides config).",
+)
+@click.option(
+    "--range",
+    "commit_range",
+    default=None,
+    help="Commit range for manual mode (e.g. abc123..def456).",
+)
+@click.option(
+    "--since",
+    "since_date",
+    default=None,
+    help="Date for daily mode (e.g. 2026-02-26). Defaults to yesterday.",
+)
+@click.option(
+    "--count",
+    "pr_count",
+    type=int,
+    default=None,
+    help="Number of PRs for count mode (overrides config).",
+)
+@click.option(
+    "--repo",
+    "repo_path",
+    type=click.Path(exists=True, file_okay=False),
+    default=".",
+    help="Path to the git repository.",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True),
+    default="apptest.yml",
+    help="Path to apptest.yml config file.",
+)
+@click.option(
+    "--output",
+    "output_dir",
+    type=click.Path(),
+    default=None,
+    help="Output directory for reports (overrides config).",
+)
+def report(
+    mode: str | None,
+    commit_range: str | None,
+    since_date: str | None,
+    pr_count: int | None,
+    repo_path: str,
+    config_path: str,
+    output_dir: str | None,
+):
+    """Generate an HTML dashboard report from PR analysis."""
+    repo = Path(repo_path).resolve()
+    config = load_config(config_path)
+
+    # CLI flags override config
+    effective_mode = mode or config.report.trigger_mode
+    effective_output = Path(output_dir) if output_dir else Path(config.report.output_dir)
+    effective_count = pr_count or config.report.trigger_count
+
+    click.echo(f"Generating report for {config.app.name}")
+    click.echo(f"Mode: {effective_mode}")
+
+    # Step 1: Collect PRs
+    click.echo("\n[1/4] Collecting PRs...")
+    if effective_mode == "manual":
+        if not commit_range:
+            click.echo("Error: --range is required for manual mode.", err=True)
+            raise SystemExit(1)
+        pr_summaries = collect_prs_manual(repo, commit_range)
+        trigger_desc = f"Manual analysis of range {commit_range}"
+        range_str = commit_range
+    elif effective_mode == "daily":
+        if not since_date:
+            from datetime import timedelta
+            since_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        pr_summaries = collect_prs_since(repo, since_date)
+        trigger_desc = f"Daily report since {since_date}"
+        range_str = f"since {since_date}"
+    elif effective_mode == "count":
+        pr_summaries = collect_prs_last_n(repo, effective_count)
+        trigger_desc = f"Last {effective_count} PRs/commits"
+        range_str = f"last {effective_count}"
+    else:
+        click.echo(f"Error: unknown mode '{effective_mode}'.", err=True)
+        raise SystemExit(1)
+
+    click.echo(f"  Found {len(pr_summaries)} PR(s)/commit(s)")
+    if not pr_summaries:
+        click.echo("No PRs found. Nothing to report.")
+        return
+
+    trigger = TriggerInfo(
+        mode=effective_mode,
+        commit_range=range_str,
+        description=trigger_desc,
+    )
+
+    # Step 2: Get version info
+    click.echo("[2/4] Getting version info...")
+    version_info = get_version_info(repo)
+
+    # Step 3: Build report (analyze each PR, generate mock tests, compute metrics)
+    click.echo("[3/4] Analyzing PRs and building report...")
+    report_data = build_report(repo, config, pr_summaries, trigger, version_info)
+
+    # Step 4: Render and save
+    click.echo("[4/4] Rendering HTML dashboard...")
+    report_dir = effective_output / report_data.report_id
+    html_path = write_report_html(report_data, report_dir)
+    json_path = write_report_json(report_data, report_dir)
+
+    # Update index
+    add_to_index(
+        output_dir=effective_output,
+        report=report_data,
+        report_html_path=f"{report_data.report_id}/report.html",
+        report_json_path=f"{report_data.report_id}/report.json",
+        max_reports=config.report.retention,
+        app_name=config.app.name,
+    )
+
+    # Update state
+    update_state(repo)
+
+    # Summary
+    m = report_data.metrics
+    click.echo(f"\nReport written to {html_path}")
+    click.echo(f"  Report ID:       {report_data.report_id}")
+    click.echo(f"  PRs analyzed:    {m.total_prs}")
+    click.echo(f"  Files changed:   {m.total_files_changed}")
+    click.echo(f"  Screens affected: {m.screens_affected}")
+    click.echo(f"  Tests generated: {m.tests_generated}")
+    click.echo(f"  Pass rate:       {m.pass_rate}%")
+    click.echo(f"\nIndex: {effective_output / 'index.html'}")
