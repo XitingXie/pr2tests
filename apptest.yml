@@ -1,0 +1,14 @@
+app:
+  name: "Wikipedia"
+  package: "org.wikipedia"
+  platform: android
+
+source:
+  root: "app/src/main/java/org/wikipedia"
+  layouts_dir: "app/src/main/res/layout"
+  strings_file: "app/src/main/res/values/strings.xml"
+  manifest: "app/src/main/AndroidManifest.xml"
+
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-20250514

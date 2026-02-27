@@ -1,0 +1,9 @@
+M	app/src/main/java/org/wikipedia/search/SearchFragment.kt
+M	app/src/main/java/org/wikipedia/search/SearchViewModel.kt
+A	app/src/main/java/org/wikipedia/search/SearchResultItem.kt
+M	app/src/main/res/layout/fragment_search.xml
+M	app/src/main/res/values/strings.xml
+D	app/src/main/java/org/wikipedia/search/OldSearchHelper.kt
+M	app/src/test/java/org/wikipedia/search/SearchTest.kt
+M	build.gradle
+R100	app/src/main/java/org/wikipedia/util/OldUtil.kt	app/src/main/java/org/wikipedia/util/NewUtil.kt

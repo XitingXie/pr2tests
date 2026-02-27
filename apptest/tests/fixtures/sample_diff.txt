@@ -1,0 +1,97 @@
+diff --git a/app/src/main/java/org/wikipedia/search/SearchFragment.kt b/app/src/main/java/org/wikipedia/search/SearchFragment.kt
+index abc1234..def5678 100644
+--- a/app/src/main/java/org/wikipedia/search/SearchFragment.kt
++++ b/app/src/main/java/org/wikipedia/search/SearchFragment.kt
+@@ -42,6 +42,10 @@ class SearchFragment : Fragment() {
+     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+         super.onViewCreated(view, savedInstanceState)
+         setupSearchInput()
++        setupVoiceSearch()
++    }
++
++    private fun setupVoiceSearch() {
++        // Voice search implementation
+     }
+
+     private fun setupSearchInput() {
+diff --git a/app/src/main/java/org/wikipedia/search/SearchViewModel.kt b/app/src/main/java/org/wikipedia/search/SearchViewModel.kt
+index 1234567..89abcde 100644
+--- a/app/src/main/java/org/wikipedia/search/SearchViewModel.kt
++++ b/app/src/main/java/org/wikipedia/search/SearchViewModel.kt
+@@ -15,3 +15,7 @@ class SearchViewModel : ViewModel() {
+     fun search(query: String) {
+         _results.value = repository.search(query)
+     }
++
++    fun voiceSearch(transcript: String) {
++        search(transcript)
++    }
+diff --git a/app/src/main/java/org/wikipedia/search/SearchResultItem.kt b/app/src/main/java/org/wikipedia/search/SearchResultItem.kt
+new file mode 100644
+index 0000000..abcdef1
+--- /dev/null
++++ b/app/src/main/java/org/wikipedia/search/SearchResultItem.kt
+@@ -0,0 +1,8 @@
++package org.wikipedia.search
++
++data class SearchResultItem(
++    val title: String,
++    val description: String,
++    val thumbnailUrl: String?,
++)
+diff --git a/app/src/main/res/layout/fragment_search.xml b/app/src/main/res/layout/fragment_search.xml
+index 111aaa..222bbb 100644
+--- a/app/src/main/res/layout/fragment_search.xml
++++ b/app/src/main/res/layout/fragment_search.xml
+@@ -10,4 +10,10 @@
+         android:id="@+id/search_input"
+         android:layout_width="match_parent"
+         android:layout_height="wrap_content" />
++
++    <ImageButton
++        android:id="@+id/voice_search_button"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:contentDescription="@string/voice_search" />
+ </LinearLayout>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 333ccc..444ddd 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -100,4 +100,5 @@
+     <string name="search_hint">Search Wikipedia</string>
++    <string name="voice_search">Voice search</string>
+ </resources>
+diff --git a/app/src/main/java/org/wikipedia/search/OldSearchHelper.kt b/app/src/main/java/org/wikipedia/search/OldSearchHelper.kt
+deleted file mode 100644
+index 555eee..0000000
+--- a/app/src/main/java/org/wikipedia/search/OldSearchHelper.kt
++++ /dev/null
+@@ -1,5 +0,0 @@
+-package org.wikipedia.search
+-
+-class OldSearchHelper {
+-    fun help() {}
+-}
+diff --git a/app/src/test/java/org/wikipedia/search/SearchTest.kt b/app/src/test/java/org/wikipedia/search/SearchTest.kt
+index 666fff..777ggg 100644
+--- a/app/src/test/java/org/wikipedia/search/SearchTest.kt
++++ b/app/src/test/java/org/wikipedia/search/SearchTest.kt
+@@ -10,3 +10,8 @@ class SearchTest {
+     fun testSearch() {
+         // existing test
+     }
++
++    @Test
++    fun testVoiceSearch() {
++        // new test
++    }
+diff --git a/build.gradle b/build.gradle
+index 888hhh..999iii 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -5,3 +5,4 @@ plugins {
+ }
+
+ // some config
++// added line

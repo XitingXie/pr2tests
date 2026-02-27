@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Wikipedia</string>
+    <string name="search_hint">Search Wikipedia</string>
+    <string name="voice_search">Voice search</string>
+    <string name="search_empty">No results found</string>
+    <string name="settings_title">Settings</string>
+    <string name="login_prompt">Log in to Wikipedia</string>
+    <string name="welcome_message">Welcome to <b>Wikipedia</b></string>
+    <string name="about_description">Wikipedia is a free encyclopedia</string>
+</resources>
