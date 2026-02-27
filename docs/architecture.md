@@ -1,8 +1,8 @@
-# Architecture: AppTest Analyzer
+# Architecture: AppTest
 
 ## Overview
 
-The analyzer is Phase 1 of the AppTest pipeline. It reads a git diff, classifies every changed file, traces logic changes to their UI screen consumers, and outputs structured context for LLM-based test generation.
+AppTest is a CLI tool that reads PR diffs, classifies changes, traces them to affected screens, and produces structured analysis for test generation. It consists of three modules: **scanner** (one-time codebase profiling), **analyzer** (per-PR analysis), and **reporter** (HTML dashboard generation).
 
 ## Design Principles
 
@@ -33,6 +33,14 @@ cli.py
   │           ├── dependency_tracer.py   (trace_to_screen, extract_constructor_dependencies, ...)
   │           ├── layout_parser.py       (parse_layout)
   │           └── strings_parser.py      (parse_strings, filter_strings)
+  ├── reporter/
+  │     ├── report_schema.py     (ReportData, PRSummary, AnalyzerSummary, ...)
+  │     ├── report_collector.py  (git-based PR collection)
+  │     ├── report_builder.py    (orchestrate: analyze → mock tests → metrics)
+  │     │     └── uses analyzer/context_builder.build_context()
+  │     ├── html_renderer.py     (self-contained HTML with inline CSS/JS)
+  │     └── report_index.py      (historical index JSON + HTML)
+  │           └── uses html_renderer.render_index()
   └── profile_manager.py         (lookup_affected_screens — used by context_builder)
 ```
 
@@ -231,6 +239,66 @@ Auto-patches the `auto` section when `analyze` runs:
 | `extract_constructor_dependencies(content)` | Parse `@Inject constructor(...)` and property injection for Repository/UseCase/Api dependencies |
 | `find_viewmodel_reference(content)` | Regex match ViewModel references (`by viewModels<...>`, etc.) |
 | `iter_source_files(root, exclude)` | Public API for walking source files (was `_iter_source_files`) |
+
+## Reporter Module (`apptest/reporter/`)
+
+The reporter generates HTML dashboards from multi-PR analysis results.
+
+### Data Flow
+
+```
+apptest report --mode <mode> [options]
+  │
+  ├── report_collector        ← git log in manual/daily/count mode
+  │     │
+  │     list[PRSummary]
+  │     │
+  ├── report_builder          ← for each PR: parse_diff + build_context (reuses analyzer)
+  │     ├── _summarize_analysis()    ← compress AnalysisResult → AnalyzerSummary
+  │     ├── _generate_mock_tests()   ← deterministic mock tests (Phase 2 placeholder)
+  │     ├── _generate_mock_execution() ← ~80% pass/15% fail/5% skip (Phase 3 placeholder)
+  │     └── _compute_metrics()       ← aggregate across all PRs
+  │     │
+  │     ReportData
+  │     │
+  ├── html_renderer           ← self-contained HTML (inline CSS/JS, date filter)
+  │     │
+  │     report.html + report.json
+  │     │
+  └── report_index            ← append to index, apply retention, re-render
+        │
+        index.html + index.json
+```
+
+### Key Data Structures (report_schema.py)
+
+| Type | Purpose |
+|------|---------|
+| `TriggerInfo` | How the report was triggered (mode, range, description) |
+| `PRSummary` | One commit/PR: ref, title, author, date, file stats |
+| `AnalyzerSummary` | Compressed analysis: counts, screens, natures, confidences |
+| `GeneratedTest` / `GeneratedTestStep` | Mock test cases per screen (Phase 2 placeholder) |
+| `TestExecutionResult` | Mock execution results (Phase 3 placeholder) |
+| `AggregateMetrics` | Roll-up: total PRs, files, screens, tests, pass rate |
+| `ReportData` | Top-level container for a complete report |
+| `ReportIndexEntry` | One row in the historical index |
+
+### HTML Dashboard Features
+
+- 5 metric cards (PRs, files, screens, tests, pass rate)
+- Sortable PR summary table with category badges
+- Collapsible per-PR analyzer details (change breakdown, screens, dependency chains)
+- Collapsible per-screen test cases with step tables
+- Test execution table with status badges and failure reasons
+- Date-range filter that dynamically updates all sections and recomputes metrics
+- Full ReportData JSON embedded as `<script type="application/json">` for programmatic extraction
+
+### CI/CD Integration
+
+A GitHub Actions workflow (`.github/workflows/dashboard.yml`) keeps the dashboard live:
+- Triggers on push to `main` and daily schedule
+- Restores previous reports from cache for accumulation
+- Deploys to GitHub Pages for always-on access
 
 ## Configuration
 

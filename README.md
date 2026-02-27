@@ -12,6 +12,11 @@ apptest init --repo /path/to/android-repo
 
 # Analyze a PR diff
 apptest analyze --diff "HEAD~1..HEAD" --repo /path/to/android-repo --config apptest.yml
+
+# Generate an HTML dashboard report
+apptest report --mode manual --range "abc123..def456" --repo /path/to/android-repo
+apptest report --mode daily --since 2026-02-26
+apptest report --mode count --count 10
 ```
 
 ## Example: Wikipedia Android
@@ -43,6 +48,7 @@ apptest analyze --diff "af457ff^..af457ff" --repo /tmp/apps-android-wikipedia
 5. **Gathers** full context: source code, layouts, strings, dependency chains
 6. **Outputs** structured `analysis.json` for downstream test generation
 7. **Auto-updates** the profile with any new screens or chain members found in the PR
+8. **Reports** (`apptest report`) — collects multiple PRs, runs the analyzer on each, generates an HTML dashboard with metrics, PR summaries, analyzer details, test steps, and execution results. Includes a date-range filter for interactive browsing.
 
 ## Configuration
 
@@ -68,6 +74,13 @@ source:
 llm:
   provider: anthropic
   model: claude-sonnet-4-20250514
+
+report:                          # optional — all fields have defaults
+  trigger_mode: manual           # "manual", "daily", "count"
+  trigger_count: 5               # for "count" mode
+  output_dir: .apptest/reports
+  retention: 30                  # keep last N reports
+  include_mock_tests: true       # generate mock tests (Phase 2/3 placeholder)
 ```
 
 The `source_root` field is accepted as an alias for `root`.
@@ -115,7 +128,7 @@ The analysis produces `analysis.json` with four change categories:
 
 ```
 apptest/
-├── cli.py                          # Click CLI entry point (init + analyze commands)
+├── cli.py                          # Click CLI entry point (init, analyze, report)
 ├── config.py                       # YAML config loader
 ├── scanner/                        # One-time codebase scanning (apptest init)
 │   ├── project_scanner.py          # Single-pass scan: screens, architecture, chains
@@ -130,6 +143,12 @@ apptest/
 │   ├── layout_parser.py            # Parse layout XML files
 │   ├── strings_parser.py           # Parse strings.xml
 │   └── screen_mapper.py            # [Deprecated] Old screen-centric mapper
+├── reporter/                       # HTML dashboard reporting (apptest report)
+│   ├── report_schema.py            # Data structures: ReportData, PRSummary, etc.
+│   ├── report_collector.py         # Git-based PR collection (manual/daily/count)
+│   ├── report_builder.py           # Orchestrate: analyze PRs → mock tests → metrics
+│   ├── html_renderer.py            # Self-contained HTML dashboard (inline CSS/JS)
+│   └── report_index.py             # Historical report index with retention
 └── tests/
     ├── test_scanner.py             # 24 tests for project scanner
     ├── test_profile_manager.py     # 17 tests for profile YAML lifecycle
@@ -142,6 +161,11 @@ apptest/
     ├── test_layout_parser.py       # 6 tests for layout parsing
     ├── test_resource_tracing.py    # 17 tests for resource-to-screen tracing
     ├── test_strings_parser.py      # 4 tests for string parsing
+    ├── test_report_schema.py       # 11 tests for report data structures
+    ├── test_report_collector.py    # 11 tests for PR collection
+    ├── test_report_builder.py      # 11 tests for report building
+    ├── test_html_renderer.py       # 18 tests for HTML rendering
+    ├── test_report_index.py        # 9 tests for report index
     ├── test_integration_wikipedia.py  # Integration tests (real Wikipedia repo)
     ├── test_integration_init.py    # Init integration tests (real Wikipedia repo)
     └── fixtures/
@@ -212,4 +236,19 @@ Git Repo
                      ┌───────────┴───────────┐
                      │                       │
                analysis.json    profile_updater.update_profile_from_analysis()
+
+
+  apptest report
+  │
+  ├─ report_collector ───► collect PRs (manual/daily/count)
+  │                              │
+  │                        list[PRSummary]
+  │                              │
+  ├─ report_builder ─────► analyze each PR (reuses full pipeline above)
+  │                              │
+  │                        AnalyzerSummary[] + mock tests + mock execution
+  │                              │
+  ├─ html_renderer ──────► self-contained HTML dashboard
+  │                              │
+  └─ report_index ───────► index.html + index.json (historical listing)
 ```
