@@ -10,6 +10,7 @@ from .analyzer.diff_parser import parse_diff
 from .analyzer.manifest_parser import parse_manifest
 from .analyzer.profile_updater import update_profile_from_analysis
 from .config import load_config
+from .generator.test_generator import GenerationResult, generate_tests, write_tests
 from .reporter.html_renderer import write_report_html
 from .reporter.report_builder import build_report, write_report_json
 from .reporter.report_collector import (
@@ -347,3 +348,64 @@ def report(
     click.echo(f"  Tests generated: {m.tests_generated}")
     click.echo(f"  Pass rate:       {m.pass_rate}%")
     click.echo(f"\nIndex: {effective_output / 'index.html'}")
+
+
+@main.command()
+@click.option(
+    "--analysis",
+    "analysis_path",
+    type=click.Path(exists=True),
+    default=".apptest/analysis.json",
+    help="Path to analysis.json from the analyze step.",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(),
+    default=".apptest/tests.json",
+    help="Output path for generated tests.",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True),
+    default="apptest.yml",
+    help="Path to apptest.yml config file.",
+)
+def generate(analysis_path: str, output_path: str, config_path: str):
+    """Generate test steps from PR analysis using an LLM."""
+    import json
+
+    config = load_config(config_path)
+
+    click.echo(f"Generating tests for {config.app.name}")
+    click.echo(f"Analysis: {analysis_path}")
+    click.echo(f"LLM: {config.llm.provider}/{config.llm.model}")
+
+    # Load analysis
+    click.echo("\n[1/3] Loading analysis...")
+    with open(analysis_path) as f:
+        analysis = json.load(f)
+
+    ui_count = len(analysis.get("ui_changes", []))
+    logic_count = len(analysis.get("logic_changes", []))
+    click.echo(f"  {ui_count} UI changes, {logic_count} logic changes")
+
+    if ui_count == 0 and logic_count == 0:
+        click.echo("No UI or logic changes to generate tests for.")
+        return
+
+    # Generate tests
+    click.echo("[2/3] Calling LLM to generate test steps...")
+    result = generate_tests(analysis, config.llm)
+
+    # Write output
+    click.echo("[3/3] Writing results...")
+    out = write_tests(result, Path(output_path))
+
+    click.echo(f"\nTests written to {out}")
+    click.echo(f"  Generated at: {result.generated_at}")
+    click.echo(f"  PR ref:       {result.pr_ref}")
+    click.echo(f"  Tests:        {len(result.tests)}")
+    for tc in result.tests:
+        click.echo(f"    [{tc.priority}] {tc.id}: {tc.covers}")

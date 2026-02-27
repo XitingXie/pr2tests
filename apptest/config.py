@@ -28,8 +28,9 @@ class SourceConfig:
 
 @dataclass
 class LLMConfig:
-    provider: str = "anthropic"
-    model: str = "claude-sonnet-4-20250514"
+    provider: str = "google"
+    model: str = "gemini-2.0-flash"
+    api_key: str = ""
 
 
 @dataclass
@@ -123,8 +124,9 @@ def load_config(config_path: str | Path) -> Config:
             exclude_dirs=source_raw.get("exclude_dirs", default_exclude),
         ),
         llm=LLMConfig(
-            provider=raw.get("llm", {}).get("provider", "anthropic"),
-            model=raw.get("llm", {}).get("model", "claude-sonnet-4-20250514"),
+            provider=raw.get("llm", {}).get("provider", "google"),
+            model=raw.get("llm", {}).get("model", "gemini-2.0-flash"),
+            api_key=raw.get("llm", {}).get("api_key", ""),
         ),
         report=ReportConfig(
             trigger_mode=raw.get("report", {}).get("trigger_mode", "manual"),
