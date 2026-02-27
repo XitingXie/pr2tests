@@ -1274,9 +1274,9 @@ def build_ui_context(file_path: str, diff: str, file_type: str, repo_path: str) 
     }
     
     if file_type == "ui_layout":
-        # Find which screen uses this layout
-        screen = map_layout_to_screen(file_path, repo_path)
-        ctx["affected_screen"] = screen
+        # Find which screens use this layout (multi-screen + include parents)
+        screens = find_screens_for_layout(file_path, repo_path)
+        ctx["affected_screens"] = screens
         ctx["related_strings"] = find_string_refs_in_layout(file_path, repo_path)
     
     elif file_type == "ui_strings":
@@ -1349,7 +1349,7 @@ def build_logic_context(file_path: str, diff: str, file_type: str, repo_path: st
       "file": "app/src/main/res/layout/fragment_search.xml",
       "diff": "... layout diff ...",
       "type": "ui_layout",
-      "affected_screen": "SearchFragment",
+      "affected_screens": ["SearchFragment"],
       "related_strings": {
         "search_hint": "Search Wikipedia",
         "search_no_results": "No results found"
@@ -1482,8 +1482,8 @@ def format_changes(context: dict) -> str:
         sections.append("### UI Changes\n")
         for change in context["ui_changes"]:
             sections.append(f"**File:** {change['file']} (type: {change['type']})")
-            if change.get("affected_screen"):
-                sections.append(f"**Affects screen:** {change['affected_screen']}")
+            if change.get("affected_screens"):
+                sections.append(f"**Affects screen(s):** {change['affected_screens']}")
             if change.get("related_strings"):
                 sections.append(f"**Related strings:** {json.dumps(change['related_strings'], indent=2)}")
             if change.get("new_strings"):

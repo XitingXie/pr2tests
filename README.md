@@ -87,9 +87,9 @@ The analysis produces `analysis.json` with four change categories:
       "file": "app/src/main/res/layout/fragment_search.xml",
       "diff": "...",
       "type": "ui_layout",
-      "affected_screen": "app/src/main/java/.../SearchFragment.kt",
+      "affected_screens": ["app/src/main/java/.../SearchFragment.kt"],
       "related_strings": {"search_hint": "Search..."},
-      "layout_info": {"referenced_ids": [...], "view_types": [...]}
+      "layout_info": {"referenced_ids": [...], "referenced_drawables": [...], "view_types": [...]}
     }
   ],
   "logic_changes": [
@@ -139,7 +139,8 @@ apptest/
     ├── test_diff_parser.py         # 5 tests for diff parsing
     ├── test_screen_mapper.py       # 10 tests (deprecated module)
     ├── test_manifest_parser.py     # 6 tests for manifest parsing
-    ├── test_layout_parser.py       # 5 tests for layout parsing
+    ├── test_layout_parser.py       # 6 tests for layout parsing
+    ├── test_resource_tracing.py    # 17 tests for resource-to-screen tracing
     ├── test_strings_parser.py      # 4 tests for string parsing
     ├── test_integration_wikipedia.py  # Integration tests (real Wikipedia repo)
     ├── test_integration_init.py    # Init integration tests (real Wikipedia repo)
@@ -149,6 +150,7 @@ apptest/
         │   ├── app/build.gradle
         │   ├── app/src/main/AndroidManifest.xml
         │   ├── app/src/main/res/layout/   # fragment_search.xml, activity_page.xml
+        │   ├── app/src/main/res/drawable/ # ic_search.xml (vector drawable)
         │   ├── app/src/main/res/values/strings.xml
         │   └── app/src/main/java/org/wikipedia/  # Kotlin source files
         ├── sample_diff.txt

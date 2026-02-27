@@ -28,6 +28,9 @@ class TestLayoutParser:
     def test_extracts_include_layouts(self):
         assert "toolbar_search" in self.layout.include_layouts
 
+    def test_extracts_drawable_references(self):
+        assert "ic_search" in self.layout.referenced_drawables
+
     def test_extracts_view_types(self):
         assert "EditText" in self.layout.view_types
         assert "ImageButton" in self.layout.view_types

@@ -13,7 +13,7 @@ from pathlib import Path
 from .change_classifier import ClassifiedFile, classify_changed_files
 from .dependency_tracer import TraceResult, trace_to_screen
 from .diff_parser import ChangedFile
-from .layout_parser import parse_layout
+from .layout_parser import LayoutInfo, parse_layout
 from .manifest_parser import ActivityInfo
 from .strings_parser import filter_strings, parse_strings
 
@@ -28,9 +28,9 @@ class UIChangeContext:
     diff: str
     type: str                           # "ui_layout", "ui_strings", ...
     content: str                        # Full file content
-    affected_screen: str | None         # Screen that uses this layout/resource
-    related_strings: dict[str, str]     # For ui_layout: resolved string refs
-    layout_info: dict | None            # Parsed layout data (IDs, strings, includes, views)
+    affected_screens: list[str] = field(default_factory=list)  # Screens using this layout/resource
+    related_strings: dict[str, str] = field(default_factory=dict)  # For ui_layout: resolved string refs
+    layout_info: dict | None = None     # Parsed layout data (IDs, strings, includes, views)
 
 
 @dataclass
@@ -126,6 +126,94 @@ def _find_screen_for_layout(layout_path: str, repo_path: Path, source_root: str)
     return None
 
 
+def _find_screens_for_layout(layout_path: str, repo_path: Path, source_root: str) -> list[str]:
+    """Like _find_screen_for_layout but returns ALL matching screens."""
+    stem = Path(layout_path).stem
+    hint = _layout_name_to_screen_hint(stem)
+    if not hint:
+        return []
+    source_dir = repo_path / source_root
+    if not source_dir.exists():
+        return []
+    screens: list[str] = []
+    for suffix in ("Fragment", "Activity"):
+        target = hint + suffix
+        for fpath in source_dir.rglob(f"{target}.kt"):
+            rel = str(fpath.relative_to(repo_path))
+            if rel not in screens:
+                screens.append(rel)
+        for fpath in source_dir.rglob(f"{target}.java"):
+            rel = str(fpath.relative_to(repo_path))
+            if rel not in screens:
+                screens.append(rel)
+    return screens
+
+
+def _find_layouts_referencing_resource(
+    name: str,
+    resource_type: str,
+    repo_path: Path,
+    layouts_dir: str,
+) -> list[str]:
+    """Find layout XML files that reference a given resource name.
+
+    Args:
+        name: Resource name (e.g. "search_hint" for a string, "ic_search" for a drawable).
+        resource_type: "string" or "drawable".
+        repo_path: Absolute path to the repo root.
+        layouts_dir: Relative path to the layout directory.
+
+    Returns:
+        List of layout file paths relative to repo_path.
+    """
+    layouts_path = repo_path / layouts_dir
+    if not layouts_path.is_dir():
+        return []
+
+    results: list[str] = []
+    for xml_file in sorted(layouts_path.glob("*.xml")):
+        try:
+            info = parse_layout(xml_file)
+        except Exception:
+            continue
+        if resource_type == "string" and name in info.referenced_strings:
+            results.append(str(xml_file.relative_to(repo_path)))
+        elif resource_type == "drawable" and name in info.referenced_drawables:
+            results.append(str(xml_file.relative_to(repo_path)))
+    return results
+
+
+def _trace_resource_to_screens(
+    names: list[str],
+    resource_type: str,
+    repo_path: Path,
+    source_root: str,
+    layouts_dir: str,
+) -> list[str]:
+    """Two-hop trace: resource names → layouts → screens.
+
+    Args:
+        names: List of resource names to look up.
+        resource_type: "string" or "drawable".
+        repo_path: Absolute path to the repo root.
+        source_root: Relative path to Java/Kotlin source root.
+        layouts_dir: Relative path to the layout directory.
+
+    Returns:
+        De-duplicated list of screen file paths (relative to repo_path).
+    """
+    screens: list[str] = []
+    for name in names:
+        layout_paths = _find_layouts_referencing_resource(
+            name, resource_type, repo_path, layouts_dir,
+        )
+        for lp in layout_paths:
+            for screen in _find_screens_for_layout(lp, repo_path, source_root):
+                if screen not in screens:
+                    screens.append(screen)
+    return screens
+
+
 # ---------------------------------------------------------------------------
 # Per-type context builders
 # ---------------------------------------------------------------------------
@@ -138,12 +226,30 @@ def _build_ui_context(
     all_strings: dict[str, str],
 ) -> UIChangeContext:
     content = _read_file(repo_path, cf.file.path)
-    affected_screen: str | None = None
+    affected_screens: list[str] = []
     related_strings: dict[str, str] = {}
     layout_info: dict | None = None
 
     if cf.category == "ui_layout":
-        affected_screen = _find_screen_for_layout(cf.file.path, repo_path, source_root)
+        # Direct name-based screen match (now multi-screen)
+        affected_screens = _find_screens_for_layout(cf.file.path, repo_path, source_root)
+        # Also find parent layouts that <include> this layout
+        stem = Path(cf.file.path).stem
+        layouts_path = repo_path / layouts_dir
+        if layouts_path.is_dir():
+            for xml_file in sorted(layouts_path.glob("*.xml")):
+                try:
+                    parent_info = parse_layout(xml_file)
+                except Exception:
+                    continue
+                if stem in parent_info.include_layouts:
+                    parent_screens = _find_screens_for_layout(
+                        str(xml_file.relative_to(repo_path)), repo_path, source_root,
+                    )
+                    for s in parent_screens:
+                        if s not in affected_screens:
+                            affected_screens.append(s)
+
         full_path = repo_path / cf.file.path
         if full_path.exists():
             try:
@@ -152,6 +258,7 @@ def _build_ui_context(
                     "filename": info.filename,
                     "referenced_ids": info.referenced_ids,
                     "referenced_strings": info.referenced_strings,
+                    "referenced_drawables": info.referenced_drawables,
                     "include_layouts": info.include_layouts,
                     "view_types": info.view_types,
                 }
@@ -159,12 +266,49 @@ def _build_ui_context(
             except Exception:
                 pass
 
+    elif cf.category == "ui_strings":
+        # Parse the strings file to get changed string names, trace through layouts
+        full_path = repo_path / cf.file.path
+        if full_path.exists():
+            try:
+                string_names = list(parse_strings(full_path).keys())
+                affected_screens = _trace_resource_to_screens(
+                    string_names, "string", repo_path, source_root, layouts_dir,
+                )
+            except Exception:
+                pass
+
+    elif cf.category == "ui_drawable":
+        # Extract drawable name from filename stem, trace through layouts
+        drawable_name = Path(cf.file.path).stem
+        affected_screens = _trace_resource_to_screens(
+            [drawable_name], "drawable", repo_path, source_root, layouts_dir,
+        )
+
+    elif cf.category == "ui_resource":
+        # Generic resource — try string names first, then drawable name as fallback
+        full_path = repo_path / cf.file.path
+        if full_path.exists():
+            try:
+                string_names = list(parse_strings(full_path).keys())
+                if string_names:
+                    affected_screens = _trace_resource_to_screens(
+                        string_names, "string", repo_path, source_root, layouts_dir,
+                    )
+            except Exception:
+                pass
+        if not affected_screens:
+            drawable_name = Path(cf.file.path).stem
+            affected_screens = _trace_resource_to_screens(
+                [drawable_name], "drawable", repo_path, source_root, layouts_dir,
+            )
+
     return UIChangeContext(
         file=cf.file.path,
         diff=cf.file.diff_content,
         type=cf.category,
         content=content,
-        affected_screen=affected_screen,
+        affected_screens=affected_screens,
         related_strings=related_strings,
         layout_info=layout_info,
     )

@@ -16,7 +16,8 @@
         android:id="@+id/voice_search_button"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:contentDescription="@string/voice_search" />
+        android:contentDescription="@string/voice_search"
+        android:src="@drawable/ic_search" />
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/search_results_list"

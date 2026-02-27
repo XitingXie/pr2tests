@@ -14,12 +14,14 @@ class LayoutInfo:
     filename: str
     referenced_ids: list[str] = field(default_factory=list)
     referenced_strings: list[str] = field(default_factory=list)
+    referenced_drawables: list[str] = field(default_factory=list)
     include_layouts: list[str] = field(default_factory=list)
     view_types: list[str] = field(default_factory=list)
 
 
 _STRING_REF_PATTERN = re.compile(r"@string/(\w+)")
 _ID_REF_PATTERN = re.compile(r"@\+?id/(\w+)")
+_DRAWABLE_REF_PATTERN = re.compile(r"@(?:drawable|mipmap)/(\w+)")
 _LAYOUT_REF_PATTERN = re.compile(r"@layout/(\w+)")
 
 
@@ -31,6 +33,7 @@ def parse_layout(layout_path: str | Path) -> LayoutInfo:
 
     ids: list[str] = []
     strings: list[str] = []
+    drawables: list[str] = []
     includes: list[str] = []
     view_types: list[str] = []
 
@@ -55,6 +58,12 @@ def parse_layout(layout_path: str | Path) -> LayoutInfo:
                 if string_name not in strings:
                     strings.append(string_name)
 
+            # Drawable / mipmap references
+            for match in _DRAWABLE_REF_PATTERN.finditer(attr_val):
+                drawable_name = match.group(1)
+                if drawable_name not in drawables:
+                    drawables.append(drawable_name)
+
         # Include layouts
         if tag == "include":
             layout_attr = elem.get("layout", "")
@@ -66,6 +75,7 @@ def parse_layout(layout_path: str | Path) -> LayoutInfo:
         filename=layout_path.name,
         referenced_ids=ids,
         referenced_strings=strings,
+        referenced_drawables=drawables,
         include_layouts=includes,
         view_types=view_types,
     )
