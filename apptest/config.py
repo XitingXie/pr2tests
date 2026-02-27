@@ -21,6 +21,9 @@ class SourceConfig:
     layouts_dir: str
     strings_file: str
     manifest: str
+    exclude_dirs: list[str] = field(default_factory=lambda: [
+        "build", ".gradle", "test", "androidTest",
+    ])
 
 
 @dataclass
@@ -87,9 +90,14 @@ def load_config(config_path: str | Path) -> Config:
             raise ValueError(f"Missing required app config field: '{key}'")
 
     source_raw = raw["source"]
+    # Accept source_root as alias for root
+    if "source_root" in source_raw and "root" not in source_raw:
+        source_raw["root"] = source_raw["source_root"]
     for key in ("root", "layouts_dir", "strings_file", "manifest"):
         if key not in source_raw:
             raise ValueError(f"Missing required source config field: '{key}'")
+
+    default_exclude = ["build", ".gradle", "test", "androidTest"]
 
     return Config(
         app=AppConfig(
@@ -102,6 +110,7 @@ def load_config(config_path: str | Path) -> Config:
             layouts_dir=source_raw["layouts_dir"],
             strings_file=source_raw["strings_file"],
             manifest=source_raw["manifest"],
+            exclude_dirs=source_raw.get("exclude_dirs", default_exclude),
         ),
         llm=LLMConfig(
             provider=raw.get("llm", {}).get("provider", "anthropic"),

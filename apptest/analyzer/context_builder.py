@@ -1,37 +1,63 @@
-"""Gather full context for each affected screen and produce analysis.json."""
+"""Build analysis context organised by change type.
+
+Classifies every changed file, traces logic changes through dependency
+chains to their screen consumers, and gathers surrounding context
+(full source, layouts, strings) for the LLM.
+"""
 
 import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .change_classifier import ClassifiedFile, classify_changed_files
+from .dependency_tracer import TraceResult, trace_to_screen
 from .diff_parser import ChangedFile
-from .layout_parser import LayoutInfo, parse_layout
-from .screen_mapper import ScreenInfo
+from .layout_parser import parse_layout
+from .manifest_parser import ActivityInfo
 from .strings_parser import filter_strings, parse_strings
 
 
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
 @dataclass
-class NavigationConnection:
-    target: str       # Target screen class name
-    method: str       # "startActivity", "replace", etc.
-    direction: str    # "outgoing" or "incoming"
+class UIChangeContext:
+    file: str
+    diff: str
+    type: str                           # "ui_layout", "ui_strings", ...
+    content: str                        # Full file content
+    affected_screen: str | None         # Screen that uses this layout/resource
+    related_strings: dict[str, str]     # For ui_layout: resolved string refs
+    layout_info: dict | None            # Parsed layout data (IDs, strings, includes, views)
 
 
 @dataclass
-class ScreenContext:
-    screen_name: str
-    qualified_name: str
-    package: str
-    host_activity: str | None
-    diff_content: dict[str, str]          # path → diff hunks
-    source_content: dict[str, str]        # path → full file content
-    layout_content: dict[str, str]        # layout file → content
-    layout_info: list[dict]               # parsed layout data
-    relevant_strings: dict[str, str]      # string name → value
-    navigation: list[dict]                # navigation connections
-    changed_files: list[str]
-    related_files: list[str]
+class LogicChangeContext:
+    file: str
+    diff: str
+    full_source: str
+    type: str                           # "logic_viewmodel", "logic_repository", ...
+    change_nature: str                  # "new_feature", "bug_fix", ...
+    dependency_chain: list[str]
+    affected_screens: list[str]
+    trace_confidence: str
+    screen_context: list[dict]          # [{screen_file, screen_source, layout, layout_file}]
+
+
+@dataclass
+class TestChangeContext:
+    file: str
+    diff: str
+    note: str
+
+
+@dataclass
+class InfraChangeContext:
+    file: str
+    diff: str
+    type: str
 
 
 @dataclass
@@ -40,185 +66,295 @@ class AnalysisResult:
     app_package: str
     diff_ref: str
     total_changed_files: int
-    affected_screens: list[ScreenContext]
+    ui_changes: list[UIChangeContext] = field(default_factory=list)
+    logic_changes: list[LogicChangeContext] = field(default_factory=list)
+    test_changes: list[TestChangeContext] = field(default_factory=list)
+    infra_changes: list[InfraChangeContext] = field(default_factory=list)
+    all_activities: list[str] = field(default_factory=list)
 
 
-_INTENT_PATTERN = re.compile(
-    r"(?:startActivity|startActivityForResult)\s*\(\s*"
-    r"(?:Intent\s*\(\s*(?:this|context|activity|requireContext\(\))\s*,\s*"
-    r"(\w+)::class\.java\s*\))"
-)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-_FRAGMENT_TRANSACTION_PATTERN = re.compile(
-    r"\.(?:replace|add)\s*\([^,]*,\s*(\w+Fragment)\s*[\(.]"
-)
-
-
-def _find_navigation_in_source(source: str) -> list[NavigationConnection]:
-    """Find navigation targets (Intents and Fragment transactions) in source code."""
-    connections = []
-
-    for match in _INTENT_PATTERN.finditer(source):
-        target = match.group(1)
-        connections.append(NavigationConnection(
-            target=target,
-            method="startActivity",
-            direction="outgoing",
-        ))
-
-    for match in _FRAGMENT_TRANSACTION_PATTERN.finditer(source):
-        target = match.group(1)
-        connections.append(NavigationConnection(
-            target=target,
-            method="fragmentTransaction",
-            direction="outgoing",
-        ))
-
-    return connections
+def _find_layout_for_screen(screen_name: str, repo_path: Path, layouts_dir: str) -> Path | None:
+    """Find layout XML matching a screen name by naming convention."""
+    base = screen_name.removesuffix("Activity").removesuffix("Fragment")
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", base).lower()
+    for prefix in ("fragment_", "activity_", "view_"):
+        candidate = repo_path / layouts_dir / f"{prefix}{snake}.xml"
+        if candidate.exists():
+            return candidate
+    return None
 
 
-def build_context(
-    screens: list[ScreenInfo],
-    changed_files: list[ChangedFile],
+def _read_file(repo_path: Path, rel_path: str) -> str:
+    """Read a file relative to repo root, returning empty string on error."""
+    full = repo_path / rel_path
+    if not full.exists():
+        return ""
+    try:
+        return full.read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def _layout_name_to_screen_hint(layout_name: str) -> str:
+    """Convert e.g. 'fragment_search' to 'Search' for matching screens."""
+    for prefix in ("fragment_", "activity_", "view_", "item_"):
+        if layout_name.startswith(prefix):
+            name = layout_name.removeprefix(prefix)
+            return "".join(w.capitalize() for w in name.split("_"))
+    return ""
+
+
+def _find_screen_for_layout(layout_path: str, repo_path: Path, source_root: str) -> str | None:
+    """Try to match a layout file to a screen file on disk."""
+    stem = Path(layout_path).stem
+    hint = _layout_name_to_screen_hint(stem)
+    if not hint:
+        return None
+    source_dir = repo_path / source_root
+    if not source_dir.exists():
+        return None
+    for suffix in ("Fragment", "Activity"):
+        target = hint + suffix
+        for fpath in source_dir.rglob(f"{target}.kt"):
+            return str(fpath.relative_to(repo_path))
+        for fpath in source_dir.rglob(f"{target}.java"):
+            return str(fpath.relative_to(repo_path))
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Per-type context builders
+# ---------------------------------------------------------------------------
+
+def _build_ui_context(
+    cf: ClassifiedFile,
     repo_path: Path,
+    source_root: str,
     layouts_dir: str,
-    strings_file: str,
-    app_name: str,
-    app_package: str,
-    diff_ref: str,
-) -> AnalysisResult:
-    """Build full context for each affected screen.
+    all_strings: dict[str, str],
+) -> UIChangeContext:
+    content = _read_file(repo_path, cf.file.path)
+    affected_screen: str | None = None
+    related_strings: dict[str, str] = {}
+    layout_info: dict | None = None
 
-    Args:
-        screens: Screens identified by screen_mapper.
-        changed_files: All changed files from the diff.
-        repo_path: Path to the repository root.
-        layouts_dir: Relative path to layout XML directory.
-        strings_file: Relative path to strings.xml.
-        app_name: App display name.
-        app_package: App package name.
-        diff_ref: Git diff reference used.
-    """
-    # Pre-load strings.xml if it exists
-    strings_path = repo_path / strings_file
-    all_strings: dict[str, str] = {}
-    if strings_path.exists():
-        all_strings = parse_strings(strings_path)
-
-    # Index changed files by path
-    changed_by_path = {cf.path: cf for cf in changed_files}
-
-    screen_contexts = []
-    for screen in screens:
-        # 1. Diff content for changed files in this screen's scope
-        diff_content: dict[str, str] = {}
-        for path in screen.changed_files:
-            if path in changed_by_path:
-                diff_content[path] = changed_by_path[path].diff_content
-
-        # 2. Full source content of the screen file and related files
-        source_content: dict[str, str] = {}
-        files_to_read = [screen.screen_file] + screen.related_files
-        for path in files_to_read:
-            if not path:
-                continue
-            full_path = repo_path / path
-            if full_path.exists():
-                source_content[path] = full_path.read_text(errors="replace")
-
-        # 3. Layout content — from changed layout files or by convention
-        layout_content: dict[str, str] = {}
-        layout_infos: list[dict] = []
-        layout_paths: list[Path] = []
-
-        # Add explicitly associated layout files
-        for lf in screen.layout_files:
-            lp = repo_path / lf
-            if lp.exists():
-                layout_paths.append(lp)
-
-        # Try to find layout by naming convention if none explicitly found
-        if not layout_paths:
-            base_name = screen.name.removesuffix("Activity").removesuffix("Fragment")
-            # Convert PascalCase to snake_case
-            snake = re.sub(r"(?<!^)(?=[A-Z])", "_", base_name).lower()
-            for prefix in ("fragment_", "activity_"):
-                candidate = repo_path / layouts_dir / f"{prefix}{snake}.xml"
-                if candidate.exists():
-                    layout_paths.append(candidate)
-                    break
-
-        for lp in layout_paths:
-            layout_content[lp.name] = lp.read_text(errors="replace")
+    if cf.category == "ui_layout":
+        affected_screen = _find_screen_for_layout(cf.file.path, repo_path, source_root)
+        full_path = repo_path / cf.file.path
+        if full_path.exists():
             try:
-                info = parse_layout(lp)
-                layout_infos.append({
+                info = parse_layout(full_path)
+                layout_info = {
                     "filename": info.filename,
                     "referenced_ids": info.referenced_ids,
                     "referenced_strings": info.referenced_strings,
                     "include_layouts": info.include_layouts,
                     "view_types": info.view_types,
-                })
+                }
+                related_strings = filter_strings(all_strings, set(info.referenced_strings))
             except Exception:
-                pass  # Layout parsing is best-effort
+                pass
 
-        # 4. Relevant strings — only those referenced by this screen's layouts/code
-        referenced_string_names: set[str] = set()
-        for info in layout_infos:
-            referenced_string_names.update(info.get("referenced_strings", []))
-        # Also scan source code for R.string.xxx references
-        for content in source_content.values():
-            for match in re.finditer(r"R\.string\.(\w+)", content):
-                referenced_string_names.add(match.group(1))
-        relevant_strings = filter_strings(all_strings, referenced_string_names)
+    return UIChangeContext(
+        file=cf.file.path,
+        diff=cf.file.diff_content,
+        type=cf.category,
+        content=content,
+        affected_screen=affected_screen,
+        related_strings=related_strings,
+        layout_info=layout_info,
+    )
 
-        # 5. Navigation connections — from source code analysis
-        navigation: list[dict] = []
-        for content in source_content.values():
-            for conn in _find_navigation_in_source(content):
-                navigation.append({
-                    "target": conn.target,
-                    "method": conn.method,
-                    "direction": conn.direction,
-                })
 
-        screen_contexts.append(ScreenContext(
-            screen_name=screen.name,
-            qualified_name=screen.qualified_name,
-            package=screen.package,
-            host_activity=screen.host_activity,
-            diff_content=diff_content,
-            source_content=source_content,
-            layout_content=layout_content,
-            layout_info=layout_infos,
-            relevant_strings=relevant_strings,
-            navigation=navigation,
-            changed_files=screen.changed_files,
-            related_files=screen.related_files,
-        ))
+_SCREEN_FANOUT_THRESHOLD = 5
 
-    return AnalysisResult(
+
+def _narrow_screens(
+    screen_files: list[str],
+    pr_changed_files: set[str],
+) -> list[str]:
+    """When a file traces to too many screens, prefer PR-changed ones."""
+    if len(screen_files) <= _SCREEN_FANOUT_THRESHOLD:
+        return screen_files
+    # Keep only screens that are also changed in this PR
+    pr_screens = [s for s in screen_files if s in pr_changed_files]
+    if pr_screens:
+        return pr_screens
+    # If none overlap, return a capped list
+    return screen_files[:_SCREEN_FANOUT_THRESHOLD]
+
+
+def _build_logic_context(
+    cf: ClassifiedFile,
+    repo_path: Path,
+    source_root: str,
+    layouts_dir: str,
+    exclude_dirs: list[str],
+    pr_changed_files: set[str] | None = None,
+    profile: dict | None = None,
+) -> LogicChangeContext:
+    full_source = _read_file(repo_path, cf.file.path)
+
+    # Fast path: try profile lookup first
+    trace: TraceResult | None = None
+    if profile is not None:
+        from ..scanner.profile_manager import lookup_affected_screens
+        profile_hits = lookup_affected_screens(cf.file.path, profile)
+        if profile_hits:
+            screen_files = [h["screen_file"] for h in profile_hits]
+            chain = profile_hits[0].get("chain", [cf.file.path] + screen_files[:1])
+            confidence = profile_hits[0].get("confidence", "medium")
+            trace = TraceResult(
+                chain=chain,
+                screen_files=screen_files,
+                confidence=confidence,
+            )
+
+    # Fallback: runtime tracing
+    if trace is None:
+        trace = trace_to_screen(
+            file_path=cf.file.path,
+            file_type=cf.category,
+            repo_path=str(repo_path),
+            source_root=source_root,
+            exclude_dirs=exclude_dirs,
+        )
+
+    narrowed_screens = _narrow_screens(
+        trace.screen_files, pr_changed_files or set()
+    )
+
+    screen_context: list[dict] = []
+    for screen_file in narrowed_screens:
+        ctx: dict = {
+            "screen_file": screen_file,
+            "screen_source": _read_file(repo_path, screen_file),
+        }
+        screen_name = Path(screen_file).stem
+        layout_path = _find_layout_for_screen(screen_name, repo_path, layouts_dir)
+        if layout_path:
+            ctx["layout_file"] = str(layout_path.relative_to(repo_path))
+            ctx["layout"] = layout_path.read_text(errors="replace")
+        screen_context.append(ctx)
+
+    return LogicChangeContext(
+        file=cf.file.path,
+        diff=cf.file.diff_content,
+        full_source=full_source,
+        type=cf.category,
+        change_nature=cf.change_nature or "modification",
+        dependency_chain=trace.chain,
+        affected_screens=narrowed_screens,
+        trace_confidence=trace.confidence,
+        screen_context=screen_context,
+    )
+
+
+def _build_test_context(cf: ClassifiedFile) -> TestChangeContext:
+    return TestChangeContext(
+        file=cf.file.path,
+        diff=cf.file.diff_content,
+        note="Test change — may signal expected behaviour change.",
+    )
+
+
+def _build_infra_context(cf: ClassifiedFile) -> InfraChangeContext:
+    return InfraChangeContext(
+        file=cf.file.path,
+        diff=cf.file.diff_content,
+        type=cf.category,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def build_context(
+    changed_files: list[ChangedFile],
+    activities: list[ActivityInfo],
+    repo_path: Path,
+    source_root: str,
+    layouts_dir: str,
+    strings_file: str,
+    exclude_dirs: list[str],
+    app_name: str,
+    app_package: str,
+    diff_ref: str,
+    profile: dict | None = None,
+) -> AnalysisResult:
+    """Classify every changed file and build per-type context.
+
+    Args:
+        changed_files: All changed files from the diff (unfiltered).
+        activities: Activity declarations from the manifest.
+        repo_path: Absolute path to the repository root.
+        source_root: Relative path to source root.
+        layouts_dir: Relative path to layout XML directory.
+        strings_file: Relative path to strings.xml.
+        exclude_dirs: Directory names to exclude from tracing.
+        app_name: App display name.
+        app_package: App package name.
+        diff_ref: Git diff reference used.
+        profile: Optional app profile for fast screen lookups.
+    """
+    # Pre-load strings.xml
+    strings_path = repo_path / strings_file
+    all_strings: dict[str, str] = {}
+    if strings_path.exists():
+        all_strings = parse_strings(strings_path)
+
+    # Classify all files
+    classified = classify_changed_files(changed_files)
+
+    # Collect all changed file paths for PR-scoped screen narrowing
+    pr_changed_files = {cf.path for cf in changed_files}
+
+    result = AnalysisResult(
         app_name=app_name,
         app_package=app_package,
         diff_ref=diff_ref,
         total_changed_files=len(changed_files),
-        affected_screens=screen_contexts,
+        all_activities=[a.name for a in activities],
     )
 
+    for cf in classified:
+        cat = cf.category
+
+        if cat.startswith("ui_"):
+            result.ui_changes.append(
+                _build_ui_context(cf, repo_path, source_root, layouts_dir, all_strings)
+            )
+        elif cat.startswith("logic_"):
+            result.logic_changes.append(
+                _build_logic_context(
+                    cf, repo_path, source_root, layouts_dir, exclude_dirs,
+                    pr_changed_files, profile,
+                )
+            )
+        elif cat == "test":
+            result.test_changes.append(_build_test_context(cf))
+        elif cat.startswith("infra_"):
+            result.infra_changes.append(_build_infra_context(cf))
+        # "other" category is silently skipped
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
 
 def write_analysis(result: AnalysisResult, output_dir: Path) -> Path:
     """Write the analysis result to a JSON file."""
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "analysis.json"
 
-    # Convert to dict for JSON serialization
-    data = {
-        "app_name": result.app_name,
-        "app_package": result.app_package,
-        "diff_ref": result.diff_ref,
-        "total_changed_files": result.total_changed_files,
-        "affected_screens": [asdict(sc) for sc in result.affected_screens],
-    }
+    data = asdict(result)
 
     with open(output_path, "w") as f:
         json.dump(data, f, indent=2)

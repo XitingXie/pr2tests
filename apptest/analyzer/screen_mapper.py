@@ -1,5 +1,11 @@
 """Map changed files to affected screens.
 
+.. deprecated::
+    This module is superseded by ``change_classifier`` + ``dependency_tracer``.
+    The classifier categorises every changed file, and the tracer walks
+    dependency chains to reach screen files.  This module is retained for
+    backward compatibility and will be removed in a future release.
+
 Uses pattern matching, package grouping, and Fragment→Activity resolution
 to determine which screens are affected by a set of file changes.
 """
