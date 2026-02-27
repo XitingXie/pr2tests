@@ -64,9 +64,10 @@ def _write_result(result, name: str) -> Path:
 class TestSmallSearchPR:
     """PR #6350: Show keyboard when showing no results (3 files)."""
 
-    def setup_method(self):
-        self.result = _run_analysis("9512546..4778ade")
-        self.output_path = _write_result(self.result, "pr6350-search-keyboard")
+    @classmethod
+    def setup_class(cls):
+        cls.result = _run_analysis("9512546..4778ade")
+        cls.output_path = _write_result(cls.result, "pr6350-search-keyboard")
 
     def test_correct_file_count(self):
         assert self.result.total_changed_files == 3
@@ -115,9 +116,10 @@ class TestSmallSearchPR:
 class TestBigHybridSearchPR:
     """PR #6221: Hybrid search feature branch (55 files)."""
 
-    def setup_method(self):
-        self.result = _run_analysis("af457ff^..af457ff")
-        self.output_path = _write_result(self.result, "pr6221-hybrid-search")
+    @classmethod
+    def setup_class(cls):
+        cls.result = _run_analysis("af457ff^..af457ff")
+        cls.output_path = _write_result(cls.result, "pr6221-hybrid-search")
 
     def test_correct_file_count(self):
         assert self.result.total_changed_files == 55
