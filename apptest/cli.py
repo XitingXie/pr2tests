@@ -261,6 +261,13 @@ def analyze(diff_ref: str, repo_path: str, config_path: str, output_dir: str):
     default=None,
     help="Output directory for reports (overrides config).",
 )
+@click.option(
+    "--run",
+    "run_path",
+    type=click.Path(exists=True, file_okay=False),
+    default=None,
+    help="Path to a run directory (auto-discovers latest if not given).",
+)
 def report(
     mode: str | None,
     commit_range: str | None,
@@ -269,6 +276,7 @@ def report(
     repo_path: str,
     config_path: str,
     output_dir: str | None,
+    run_path: str | None,
 ):
     """Generate an HTML dashboard report from PR analysis."""
     repo = Path(repo_path).resolve()
@@ -321,9 +329,18 @@ def report(
     click.echo("[2/4] Getting version info...")
     version_info = get_version_info(repo)
 
+    # Resolve run directory
+    run_dir = None
+    if run_path:
+        run_dir = Path(run_path).resolve()
+    else:
+        run_dir = get_latest_run()
+    if run_dir is not None:
+        click.echo(f"Using run: {run_dir.name}")
+
     # Step 3: Build report (analyze each PR, generate mock tests, compute metrics)
     click.echo("[3/4] Analyzing PRs and building report...")
-    report_data = build_report(repo, config, pr_summaries, trigger, version_info)
+    report_data = build_report(repo, config, pr_summaries, trigger, version_info, run_dir=run_dir)
 
     # Step 4: Render and save
     click.echo("[4/4] Rendering HTML dashboard...")
@@ -471,13 +488,13 @@ def generate(analysis_path: str, output_path: str, config_path: str):
     "--model",
     "model_override",
     default=None,
-    help="Override LLM model (e.g. gpt-4o, gemini-2.0-flash).",
+    help="Override LLM model (e.g. kimi-k2.5, gemini-2.0-flash, gpt-4o).",
 )
 @click.option(
     "--provider",
     "provider_override",
     default=None,
-    help="Override LLM provider (google or openai).",
+    help="Override LLM provider (moonshot, google, or openai).",
 )
 def run(
     tests_path: str,

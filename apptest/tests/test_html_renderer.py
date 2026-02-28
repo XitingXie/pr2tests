@@ -179,6 +179,15 @@ class TestRenderReport:
         assert "No tests generated" in html
         assert "No execution results" in html
 
+    def test_trace_link_when_path_set(self):
+        html = render_report(_make_report(trace_html_path="/some/trace.html"))
+        assert "LLM Trace Log" in html
+        assert 'href="trace.html"' in html
+
+    def test_no_trace_link_when_empty(self):
+        html = render_report(_make_report(trace_html_path=""))
+        assert "LLM Trace Log" not in html
+
 
 class TestRenderIndex:
     def test_valid_html(self):

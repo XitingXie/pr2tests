@@ -8,9 +8,11 @@ from apptest.analyzer.context_builder import (
 )
 from apptest.reporter.report_builder import (
     _compute_metrics,
+    _executions_from_run,
     _generate_mock_execution,
     _generate_mock_tests,
     _summarize_analysis,
+    _tests_from_run,
 )
 from apptest.reporter.report_schema import (
     AnalyzerSummary,
@@ -178,3 +180,105 @@ class TestComputeMetrics:
         m = _compute_metrics([], [], [], [])
         assert m.total_prs == 0
         assert m.pass_rate == 0.0
+
+
+class TestTestsFromRun:
+    def test_converts_test_cases(self):
+        data = {
+            "pr_ref": "abc..def",
+            "tests": [
+                {
+                    "id": "test_001",
+                    "description": "1. Open the app\n2. Tap search\n3. Verify results",
+                    "covers": "Search feature",
+                    "priority": "high",
+                },
+            ],
+        }
+        tests = _tests_from_run(data, "abc..def")
+        assert len(tests) == 1
+        t = tests[0]
+        assert t.test_id == "test_001"
+        assert t.screen == "Search feature"
+        assert t.test_name == "Search feature"
+        assert t.priority == "high"
+        assert t.pr_ref == "abc..def"
+        assert len(t.steps) == 3
+
+    def test_empty_tests(self):
+        data = {"tests": []}
+        tests = _tests_from_run(data, "ref")
+        assert tests == []
+
+    def test_missing_tests_key(self):
+        tests = _tests_from_run({}, "ref")
+        assert tests == []
+
+    def test_skips_blank_lines(self):
+        data = {
+            "tests": [
+                {
+                    "id": "t1",
+                    "description": "Step one\n\nStep two\n",
+                    "covers": "feature",
+                    "priority": "low",
+                },
+            ],
+        }
+        tests = _tests_from_run(data, "ref")
+        assert len(tests[0].steps) == 2
+
+    def test_defaults_priority(self):
+        data = {"tests": [{"id": "t1", "description": "Step", "covers": "x"}]}
+        tests = _tests_from_run(data, "ref")
+        assert tests[0].priority == "medium"
+
+
+class TestExecutionsFromRun:
+    def test_converts_results(self):
+        data = {
+            "results": [
+                {
+                    "test_id": "test_001",
+                    "status": "passed",
+                    "total_duration_ms": 5000,
+                    "failure_reason": "",
+                    "steps": [
+                        {"step_index": 0, "status": "passed"},
+                        {"step_index": 1, "status": "passed"},
+                    ],
+                },
+                {
+                    "test_id": "test_002",
+                    "status": "failed",
+                    "total_duration_ms": 3000,
+                    "failure_reason": "Element not found",
+                    "steps": [
+                        {"step_index": 0, "status": "passed"},
+                        {"step_index": 1, "status": "failed"},
+                    ],
+                },
+            ],
+        }
+        results = _executions_from_run(data)
+        assert len(results) == 2
+        assert results[0].test_id == "test_001"
+        assert results[0].status == "passed"
+        assert results[0].duration_ms == 5000
+        assert results[0].steps_completed == 2
+        assert results[0].steps_total == 2
+        assert results[1].steps_completed == 1
+        assert results[1].failure_reason == "Element not found"
+
+    def test_empty_results(self):
+        results = _executions_from_run({"results": []})
+        assert results == []
+
+    def test_missing_results_key(self):
+        results = _executions_from_run({})
+        assert results == []
+
+    def test_defaults_status_to_error(self):
+        data = {"results": [{"test_id": "t1", "steps": []}]}
+        results = _executions_from_run(data)
+        assert results[0].status == "error"

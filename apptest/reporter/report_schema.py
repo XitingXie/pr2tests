@@ -101,6 +101,7 @@ class ReportData:
     analyzer_results: list[AnalyzerSummary] = field(default_factory=list)
     generated_tests: list[GeneratedTest] = field(default_factory=list)
     execution_results: list[TestExecutionResult] = field(default_factory=list)
+    trace_html_path: str = ""  # Path to trace.html from the run dir (if available)
     metrics: AggregateMetrics = field(default_factory=lambda: AggregateMetrics(
         total_prs=0, total_files_changed=0,
     ))

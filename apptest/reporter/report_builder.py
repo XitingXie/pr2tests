@@ -87,6 +87,62 @@ _MOCK_ACTIONS = [
 ]
 
 
+def _tests_from_run(data: dict, pr_ref: str) -> list[GeneratedTest]:
+    """Convert a GenerationResult-format dict (from tests.json) to GeneratedTest list.
+
+    Each TestCase's description is split into lines to create GeneratedTestStep objects.
+    """
+    tests: list[GeneratedTest] = []
+    for tc in data.get("tests", []):
+        steps: list[GeneratedTestStep] = []
+        description = tc.get("description", "")
+        for i, line in enumerate(description.splitlines(), 1):
+            line = line.strip()
+            if not line:
+                continue
+            # Strip leading numbering like "1. " or "- "
+            clean = line.lstrip("0123456789.-) ").strip()
+            if not clean:
+                clean = line
+            steps.append(GeneratedTestStep(
+                order=i,
+                action="step",
+                target="",
+                value=clean,
+                expected="",
+            ))
+
+        test_id = tc.get("id", f"test_{len(tests) + 1}")
+        covers = tc.get("covers", "")
+        tests.append(GeneratedTest(
+            test_id=test_id,
+            screen=covers,
+            test_name=covers or test_id,
+            description=description,
+            priority=tc.get("priority", "medium"),
+            pr_ref=pr_ref,
+            steps=steps,
+        ))
+    return tests
+
+
+def _executions_from_run(data: dict) -> list[TestExecutionResult]:
+    """Convert a RunSummary-format dict (from results.json) to TestExecutionResult list."""
+    results: list[TestExecutionResult] = []
+    for r in data.get("results", []):
+        step_list = r.get("steps", [])
+        completed = sum(1 for s in step_list if s.get("status") == "passed")
+        results.append(TestExecutionResult(
+            test_id=r.get("test_id", ""),
+            status=r.get("status", "error"),
+            duration_ms=r.get("total_duration_ms", 0),
+            failure_reason=r.get("failure_reason", ""),
+            steps_completed=completed,
+            steps_total=len(step_list),
+        ))
+    return results
+
+
 def _generate_mock_tests(summary: AnalyzerSummary, pr_ref: str) -> list[GeneratedTest]:
     """Generate 1-3 mock test cases per affected screen.
 
@@ -266,6 +322,7 @@ def build_report(
     pr_summaries: list[PRSummary],
     trigger: TriggerInfo,
     version_info: str,
+    run_dir: Path | None = None,
 ) -> ReportData:
     """Build a complete report from collected PRs.
 
@@ -275,6 +332,9 @@ def build_report(
         pr_summaries: Collected PR/commit summaries.
         trigger: How the report was triggered.
         version_info: Version string for HEAD.
+        run_dir: Optional path to a run directory containing tests.json
+                 and results.json. When provided and both files exist,
+                 real data is used instead of mock generation.
 
     Returns:
         Complete ReportData ready for rendering.
@@ -285,6 +345,25 @@ def build_report(
     analyzer_results: list[AnalyzerSummary] = []
     all_tests: list[GeneratedTest] = []
     all_executions: list[TestExecutionResult] = []
+    trace_html_path = ""
+
+    # Try to load real run data
+    has_run_data = False
+    if run_dir is not None:
+        tests_file = run_dir / "tests.json"
+        results_file = run_dir / "results.json"
+        if tests_file.exists() and results_file.exists():
+            tests_data = json.loads(tests_file.read_text())
+            results_data = json.loads(results_file.read_text())
+            pr_ref = tests_data.get("pr_ref", "unknown")
+            all_tests = _tests_from_run(tests_data, pr_ref)
+            all_executions = _executions_from_run(results_data)
+            has_run_data = True
+
+            # Check for trace.html
+            trace_file = run_dir / "trace.html"
+            if trace_file.exists():
+                trace_html_path = str(trace_file)
 
     for pr in pr_summaries:
         result = analyze_pr(repo, config, pr, profile)
@@ -302,8 +381,8 @@ def build_report(
             "infra": summary.infra_count,
         }
 
-        # Mock test generation & execution (Phase 2/3 placeholder)
-        if config.report.include_mock_tests:
+        # Fall back to mock generation when no real run data is available
+        if not has_run_data and config.report.include_mock_tests:
             tests = _generate_mock_tests(summary, pr.ref)
             executions = _generate_mock_execution(tests)
             all_tests.extend(tests)
@@ -321,6 +400,7 @@ def build_report(
         analyzer_results=analyzer_results,
         generated_tests=all_tests,
         execution_results=all_executions,
+        trace_html_path=trace_html_path,
         metrics=metrics,
     )
 
