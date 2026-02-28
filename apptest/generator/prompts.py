@@ -7,9 +7,14 @@ Your job is to generate **user-facing test cases** — manual steps a tester wou
 ## Rules
 - Each test case must describe concrete user actions (tap, type, scroll, navigate, assert).
 - Focus on what changed — do NOT test unchanged behavior.
-- Cover the happy path first, then edge cases and error scenarios.
+- CRITICAL: Only verify behavior that the code **explicitly implements**. Read the diff carefully. \
+If the code adds `showKeyboard()` on no results, test that the keyboard appears on no results. \
+Do NOT infer opposite behavior (e.g., "keyboard hides on results") unless the code explicitly \
+implements that. Do NOT assume side effects or implicit behavior that is not in the diff.
+- Cover the happy path first, then edge cases that exercise the same code path.
 - If a bug fix is described, write a regression test that reproduces the original bug.
-- For new features, cover: basic usage, boundary inputs, and error states.
+- For new features, test the feature as coded — do not invent negative tests for behavior \
+the PR does not change.
 - Keep steps concise but unambiguous — another tester should be able to follow them exactly.
 - Include any specific test data (search terms, input values, etc.) needed to reproduce.
 - Prioritize: high = must-test before release, medium = should-test, low = nice-to-test.

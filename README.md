@@ -1,6 +1,6 @@
-# AppTest — AI-Powered Test Generation from PR Diffs
+# AppTest — AI-Powered Test Generation & Execution from PR Diffs
 
-AppTest is a CLI tool that integrates into CI pipelines to automatically generate and execute test cases for Android apps. It reads PR diffs, classifies every change, traces logic changes to affected screens, and gathers structured context for LLM-powered test generation.
+AppTest is a CLI tool that integrates into CI pipelines to automatically generate and execute test cases for Android apps. It reads PR diffs, classifies every change, traces logic changes to affected screens, gathers structured context for LLM-powered test generation, and runs the generated tests on real Android emulators using ADB + multimodal vision LLMs (Gemini, OpenAI, Moonshot Kimi K2.5).
 
 ## Quick Start
 
@@ -12,6 +12,17 @@ apptest init --repo /path/to/android-repo
 
 # Analyze a PR diff
 apptest analyze --diff "HEAD~1..HEAD" --repo /path/to/android-repo --config apptest.yml
+
+# Generate test steps from analysis
+apptest generate --analysis .apptest/analysis.json --config apptest.yml
+
+# Run tests on an Android emulator (requires running emulator + installed app)
+apptest run --tests .apptest/tests.json --device emulator-5554 --package org.wikipedia
+
+# Run tests with Kimi K2.5 (normalized coordinates, better accuracy)
+export MOONSHOT_API_KEY=your_key
+apptest run --tests .apptest/tests.json --device emulator-5554 --package org.wikipedia \
+  --provider moonshot --model kimi-k2.5
 
 # Generate an HTML dashboard report
 apptest report --mode manual --range "abc123..def456" --repo /path/to/android-repo
@@ -48,7 +59,9 @@ apptest analyze --diff "af457ff^..af457ff" --repo /tmp/apps-android-wikipedia
 5. **Gathers** full context: source code, layouts, strings, dependency chains
 6. **Outputs** structured `analysis.json` for downstream test generation
 7. **Auto-updates** the profile with any new screens or chain members found in the PR
-8. **Reports** (`apptest report`) — collects multiple PRs, runs the analyzer on each, generates an HTML dashboard with metrics, PR summaries, analyzer details, test steps, and execution results. Includes a date-range filter for interactive browsing.
+8. **Generates** test steps (`apptest generate`) — sends analysis to an LLM, receives step-by-step test cases
+9. **Runs** tests (`apptest run`) — executes generated tests on a real Android emulator using ADB for device control and multimodal vision LLMs (Gemini, OpenAI, or Kimi K2.5) to interpret screenshots and decide actions. Saves screenshots, action logs, results.json, and an LLM trace timeline (trace.html).
+10. **Reports** (`apptest report`) — collects multiple PRs, runs the analyzer on each, generates an HTML dashboard with metrics, PR summaries, analyzer details, test steps, and execution results. Includes a date-range filter for interactive browsing.
 
 ## Configuration
 
@@ -72,8 +85,8 @@ source:
     - androidTest
 
 llm:
-  provider: anthropic
-  model: claude-sonnet-4-20250514
+  provider: google             # google, openai, or moonshot
+  model: gemini-2.0-flash      # or kimi-k2.5, gpt-4o, etc.
 
 report:                          # optional — all fields have defaults
   trigger_mode: manual           # "manual", "daily", "count"
@@ -128,7 +141,7 @@ The analysis produces `analysis.json` with four change categories:
 
 ```
 apptest/
-├── cli.py                          # Click CLI entry point (init, analyze, report)
+├── cli.py                          # Click CLI entry point (init, analyze, generate, run, report)
 ├── config.py                       # YAML config loader
 ├── scanner/                        # One-time codebase scanning (apptest init)
 │   ├── project_scanner.py          # Single-pass scan: screens, architecture, chains
@@ -143,6 +156,18 @@ apptest/
 │   ├── layout_parser.py            # Parse layout XML files
 │   ├── strings_parser.py           # Parse strings.xml
 │   └── screen_mapper.py            # [Deprecated] Old screen-centric mapper
+├── generator/                      # LLM-based test generation (apptest generate)
+│   ├── test_generator.py           # LLM call, prompt formatting, JSON parsing
+│   └── prompts.py                  # System prompts for test generation
+├── runner/                         # Test execution on device (apptest run)
+│   ├── schemas.py                  # ActionType, Action, StepResult, TestRunResult, RunSummary
+│   ├── adb.py                      # ADBDevice class: screenshots, taps, swipes, app management
+│   ├── step_parser.py              # Parse numbered natural-language steps
+│   ├── prompts.py                  # ACTION_PROMPT, VERIFICATION_PROMPT for vision LLMs
+│   ├── vision.py                   # decide_action(), verify_step() — Gemini, OpenAI, Kimi K2.5
+│   ├── computer_use.py             # Gemini computer_use tool integration
+│   ├── trace.py                    # TraceEntry, RunTrace, generate_trace_html() for LLM debugging
+│   └── executor.py                 # execute_test(), run_all_tests() main loop + trace threading
 ├── reporter/                       # HTML dashboard reporting (apptest report)
 │   ├── report_schema.py            # Data structures: ReportData, PRSummary, etc.
 │   ├── report_collector.py         # Git-based PR collection (manual/daily/count)
@@ -166,6 +191,8 @@ apptest/
     ├── test_report_builder.py      # 11 tests for report building
     ├── test_html_renderer.py       # 18 tests for HTML rendering
     ├── test_report_index.py        # 9 tests for report index
+    ├── test_step_parser.py         # 12 tests for step parsing
+    ├── test_runner.py              # 21 tests for runner (vision, executor, schemas)
     ├── test_integration_wikipedia.py  # Integration tests (real Wikipedia repo)
     ├── test_integration_init.py    # Init integration tests (real Wikipedia repo)
     └── fixtures/
@@ -236,6 +263,30 @@ Git Repo
                      ┌───────────┴───────────┐
                      │                       │
                analysis.json    profile_updater.update_profile_from_analysis()
+
+
+  apptest generate
+  │
+  ├─ analysis.json ─────► test_generator.generate_tests()
+  │                              │
+  │                        LLM call (Gemini/Claude)
+  │                              │
+  └─────────────────────► tests.json (natural-language test steps)
+
+
+  apptest run
+  │
+  ├─ tests.json ────────► step_parser.parse_test_steps()
+  │                              │
+  │                        list[ParsedStep]
+  │                              │
+  ├─ For each step: ────► screenshot → Vision LLM → action → ADB
+  │                              │
+  │   Action steps:        decide_action() loop (up to 15 iterations)
+  │   Verification steps:  verify_step() single call
+  │   Providers:           Gemini, OpenAI, Kimi K2.5 (0-1000 coords)
+  │                              │
+  └─────────────────────► results.json + trace.html + screenshots/
 
 
   apptest report

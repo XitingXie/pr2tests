@@ -2,7 +2,7 @@
 
 ## Overview
 
-AppTest is a CLI tool that reads PR diffs, classifies changes, traces them to affected screens, and produces structured analysis for test generation. It consists of three modules: **scanner** (one-time codebase profiling), **analyzer** (per-PR analysis), and **reporter** (HTML dashboard generation).
+AppTest is a CLI tool that reads PR diffs, classifies changes, traces them to affected screens, and produces structured analysis for test generation and execution. It consists of five modules: **scanner** (one-time codebase profiling), **analyzer** (per-PR analysis), **generator** (LLM test step generation), **runner** (device execution with vision LLMs), and **reporter** (HTML dashboard generation).
 
 ## Design Principles
 
@@ -239,6 +239,61 @@ Auto-patches the `auto` section when `analyze` runs:
 | `extract_constructor_dependencies(content)` | Parse `@Inject constructor(...)` and property injection for Repository/UseCase/Api dependencies |
 | `find_viewmodel_reference(content)` | Regex match ViewModel references (`by viewModels<...>`, etc.) |
 | `iter_source_files(root, exclude)` | Public API for walking source files (was `_iter_source_files`) |
+
+## Runner Module (`apptest/runner/`)
+
+The runner executes generated tests on Android devices using ADB for device control and multimodal vision LLMs to interpret screenshots.
+
+### Vision Providers
+
+| Provider | Config | Coordinate System | Key Feature |
+|----------|--------|-------------------|-------------|
+| Google Gemini | `provider: google` | Raw pixels (0-width, 0-height) | Default, `GEMINI_API_KEY` |
+| OpenAI | `provider: openai` | Raw pixels | GPT-4o etc., `OPENAI_API_KEY` |
+| Moonshot Kimi K2.5 | `provider: moonshot` | Normalized 0-1000 | Best accuracy, `MOONSHOT_API_KEY` |
+
+### Kimi K2.5 Integration
+
+Kimi uses a different prompting strategy than Gemini/OpenAI:
+- **System prompt** defines the JSON schema and action types
+- **Normalized 0-1000 coordinates** — model returns `coords: [500, 130]`, denormalized to pixels: `x = int(500/1000 * screen_width)`
+- **`response_format={"type": "json_object"}`** enforces valid JSON (no regex extraction needed)
+- **Grounding hint**: "mentally draw a 10x10 grid over the image to align element centers"
+- **Instant mode** (thinking disabled) for action steps; **Thinking mode** for verification
+
+### LLM Trace Logging
+
+Every LLM call is captured in a `RunTrace` with `TraceEntry` records containing the full prompt, screenshot (base64), raw response, parsed result, timing, and model info. At the end of a run, `generate_trace_html()` produces a self-contained HTML timeline at `{output_dir}/trace.html`.
+
+### Data Flow
+
+```
+apptest run --tests tests.json --provider moonshot --model kimi-k2.5
+  │
+  ├── step_parser          ← parse numbered steps, detect verification prefixes
+  │     │
+  │     list[ParsedStep]
+  │     │
+  ├── executor             ← for each test: for each step: action loop or verification
+  │     │
+  │     ├── _run_action_step()
+  │     │     └── vision.decide_action()  ← screenshot + prompt → LLM → Action
+  │     │           ├── Google/OpenAI: raw pixel coords in response
+  │     │           └── Moonshot: normalized 0-1000 → denormalize to pixels
+  │     │
+  │     ├── _run_verification_step()
+  │     │     └── vision.verify_step()    ← screenshot + assertion → LLM → pass/fail
+  │     │
+  │     └── _run_action_step_computer_use()
+  │           └── ComputerUseSession.get_action()  ← Gemini computer_use tool
+  │     │
+  │     RunTrace (accumulated across all tests)
+  │     │
+  └── output
+        ├── results.json     ← TestRunResult per test, StepResult per step, Action log
+        ├── trace.html       ← LLM interaction timeline (screenshots + prompts + responses)
+        └── screenshots/     ← per-action PNGs
+```
 
 ## Reporter Module (`apptest/reporter/`)
 

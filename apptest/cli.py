@@ -409,3 +409,116 @@ def generate(analysis_path: str, output_path: str, config_path: str):
     click.echo(f"  Tests:        {len(result.tests)}")
     for tc in result.tests:
         click.echo(f"    [{tc.priority}] {tc.id}: {tc.covers}")
+
+
+@main.command()
+@click.option(
+    "--tests",
+    "tests_path",
+    type=click.Path(exists=True),
+    default=".apptest/tests.json",
+    help="Path to tests.json from the generate step.",
+)
+@click.option(
+    "--output",
+    "output_dir",
+    type=click.Path(),
+    default=".apptest/results",
+    help="Output directory for results and screenshots.",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True),
+    default="apptest.yml",
+    help="Path to apptest.yml config file.",
+)
+@click.option(
+    "--device",
+    "device_serial",
+    default="emulator-5554",
+    help="ADB device serial (default: emulator-5554).",
+)
+@click.option(
+    "--package",
+    "package_override",
+    default=None,
+    help="Override app package name from config.",
+)
+@click.option(
+    "--clear-data",
+    "clear_data",
+    is_flag=True,
+    default=False,
+    help="Clear app data before running (triggers onboarding).",
+)
+@click.option(
+    "--model",
+    "model_override",
+    default=None,
+    help="Override LLM model (e.g. gpt-4o, gemini-2.0-flash).",
+)
+@click.option(
+    "--provider",
+    "provider_override",
+    default=None,
+    help="Override LLM provider (google or openai).",
+)
+def run(
+    tests_path: str,
+    output_dir: str,
+    config_path: str,
+    device_serial: str,
+    package_override: str | None,
+    clear_data: bool,
+    model_override: str | None,
+    provider_override: str | None,
+):
+    """Run generated tests on an Android device/emulator."""
+    from .runner.executor import run_all_tests
+    from .runner.schemas import to_execution_results
+
+    config = load_config(config_path)
+    app_package = package_override or config.app.package
+
+    if model_override:
+        config.llm.model = model_override
+    if provider_override:
+        config.llm.provider = provider_override
+
+    click.echo(f"Running tests for {config.app.name} ({app_package})")
+    click.echo(f"Tests:  {tests_path}")
+    click.echo(f"Device: {device_serial}")
+    click.echo(f"Output: {output_dir}")
+    click.echo(f"LLM:    {config.llm.provider}/{config.llm.model}")
+
+    click.echo("\n[1/1] Executing tests...")
+    try:
+        summary = run_all_tests(
+            tests_path=tests_path,
+            config=config.llm,
+            app_package=app_package,
+            device_serial=device_serial,
+            output_dir=output_dir,
+            clear_data=clear_data,
+        )
+    except RuntimeError as e:
+        click.echo(f"\nError: {e}", err=True)
+        raise SystemExit(1)
+    except ValueError as e:
+        click.echo(f"\nError: {e}", err=True)
+        raise SystemExit(1)
+
+    # Summary
+    click.echo(f"\nResults written to {output_dir}/results.json")
+    click.echo(f"  Total:   {summary.total_tests}")
+    click.echo(f"  Passed:  {summary.passed}")
+    click.echo(f"  Failed:  {summary.failed}")
+    click.echo(f"  Skipped: {summary.skipped}")
+    click.echo(f"  Errors:  {summary.errored}")
+
+    for r in summary.results:
+        icon = "PASS" if r.status == "passed" else "FAIL"
+        click.echo(f"  [{icon}] {r.test_id}")
+        if r.failure_reason:
+            click.echo(f"         {r.failure_reason}")

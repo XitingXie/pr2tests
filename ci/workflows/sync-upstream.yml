@@ -1,0 +1,188 @@
+name: Sync upstream & create analysis PRs
+on:
+  schedule:
+    - cron: '0 8 * * *'  # daily at 8am UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/wikimedia/apps-android-wikipedia.git
+          git fetch upstream main
+
+      - name: Get last synced SHA
+        id: last
+        run: |
+          # Use last-sync tag if it exists; otherwise find the fork point
+          if git rev-parse refs/tags/last-sync >/dev/null 2>&1; then
+            SHA=$(git rev-parse refs/tags/last-sync)
+          else
+            # First run: find where our fork diverged from upstream
+            SHA=$(git merge-base HEAD upstream/main)
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Last synced: $SHA"
+
+      - name: Find newly merged upstream PRs
+        id: prs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LAST_SHA: ${{ steps.last.outputs.sha }}
+        run: |
+          UPSTREAM_SHA=$(git rev-parse upstream/main)
+          if [ "$LAST_SHA" = "$UPSTREAM_SHA" ]; then
+            echo "prs=[]" >> "$GITHUB_OUTPUT"
+            echo "Already up to date"
+            exit 0
+          fi
+
+          # List upstream PRs merged since last sync
+          # Use merge commits between last sync and upstream/main
+          gh api repos/wikimedia/apps-android-wikipedia/pulls \
+            --method GET \
+            -f state=closed \
+            -f sort=updated \
+            -f direction=desc \
+            -f per_page=30 \
+            --jq "[
+              .[] |
+              select(.merged_at != null) |
+              select(.merge_commit_sha != null) |
+              {
+                number: .number,
+                title: .title,
+                merge_sha: .merge_commit_sha,
+                base_sha: .base.sha,
+                head_sha: .head.sha,
+                merged_at: .merged_at,
+                user: .user.login
+              }
+            ]" > /tmp/recent_prs.json
+
+          # Filter to only PRs whose merge commit is in the new range
+          python3 <<'PYEOF'
+          import json, subprocess
+
+          with open("/tmp/recent_prs.json") as f:
+              prs = json.load(f)
+
+          last = "${{ steps.last.outputs.sha }}"
+          new_commits = subprocess.check_output(
+              ["git", "rev-list", f"{last}..upstream/main"],
+              text=True
+          ).strip().split("\n")
+          new_set = set(new_commits)
+
+          matched = [p for p in prs if p["merge_sha"] in new_set]
+          # Oldest first so PRs are created in order
+          matched.sort(key=lambda p: p["merged_at"])
+
+          with open("/tmp/matched_prs.json", "w") as f:
+              json.dump(matched, f)
+
+          print(f"Found {len(matched)} new merged PRs")
+          for p in matched:
+              print(f"  #{p['number']}: {p['title']}")
+          PYEOF
+
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Create PR for each upstream merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -f /tmp/matched_prs.json ]; then
+            echo "No new PRs to process"
+            exit 0
+          fi
+
+          python3 <<'PYEOF'
+          import json, subprocess, sys
+
+          with open("/tmp/matched_prs.json") as f:
+              prs = json.load(f)
+
+          if not prs:
+              print("No new PRs")
+              sys.exit(0)
+
+          for pr in prs:
+              num = pr["number"]
+              title = pr["title"]
+              merge_sha = pr["merge_sha"]
+              merged_at = pr["merged_at"]
+              user = pr["user"]
+              branch = f"upstream-pr/{num}"
+
+              print(f"\nProcessing #{num}: {title}")
+
+              # Create branch at the merge commit's parent (base)
+              # The PR diff = merge_commit~1..merge_commit
+              base_sha = subprocess.check_output(
+                  ["git", "rev-parse", f"{merge_sha}~1"],
+                  text=True
+              ).strip()
+
+              # Create a branch from base, cherry-pick the merge
+              subprocess.run(["git", "checkout", "-B", branch, base_sha], check=True)
+              # Reset to merge commit to get the final state
+              subprocess.run(["git", "reset", "--hard", merge_sha], check=True)
+              subprocess.run(["git", "push", "origin", branch, "--force"], check=True)
+
+              # Create PR: base=main, head=branch
+              # The diff shows what this upstream PR changed
+              body = (
+                  f"## Upstream PR #{num}\n\n"
+                  f"**Original:** https://github.com/wikimedia/apps-android-wikipedia/pull/{num}\n"
+                  f"**Author:** @{user}\n"
+                  f"**Merged:** {merged_at}\n\n"
+                  f"---\n"
+                  f"This PR mirrors upstream changes for automated AppTest analysis.\n"
+              )
+
+              result = subprocess.run(
+                  ["gh", "pr", "create",
+                   "--title", f"[Upstream #{num}] {title}",
+                   "--body", body,
+                   "--base", "main",
+                   "--head", branch],
+                  capture_output=True, text=True
+              )
+              if result.returncode == 0:
+                  print(f"  Created: {result.stdout.strip()}")
+              else:
+                  print(f"  Failed: {result.stderr.strip()}")
+          PYEOF
+
+      - name: Fast-forward main to upstream
+        env:
+          UPSTREAM_SHA: ${{ steps.prs.outputs.upstream_sha }}
+        run: |
+          if [ -z "$UPSTREAM_SHA" ]; then
+            echo "No upstream SHA, skipping"
+            exit 0
+          fi
+          git checkout main
+          git merge --ff-only upstream/main || true
+          git push origin main || true
+
+          # Update sync marker
+          git tag -f last-sync "$UPSTREAM_SHA"
+          git push origin --tags --force

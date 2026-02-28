@@ -5,3 +5,4 @@ dist/
 build/
 .apptest/
 .pytest_cache/
+.env
