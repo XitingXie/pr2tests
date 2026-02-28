@@ -22,6 +22,7 @@ from .reporter.report_collector import (
 )
 from .reporter.report_index import add_to_index
 from .reporter.report_schema import TriggerInfo
+from .run_manager import create_run_dir, get_latest_run
 from .scanner.profile_manager import load_effective_profile, save_profile
 from .scanner.project_scanner import scan_project
 
@@ -178,8 +179,13 @@ def analyze(diff_ref: str, repo_path: str, config_path: str, output_dir: str):
         profile=profile,
     )
 
-    # Write output
-    out_path = write_analysis(result, Path(output_dir))
+    # Write output — auto-create run dir when using default output
+    if output_dir == ".apptest":
+        run_dir = create_run_dir(config.app.name)
+        out_path = write_analysis(result, run_dir)
+        click.echo(f"Run: {run_dir.name}")
+    else:
+        out_path = write_analysis(result, Path(output_dir))
 
     # Auto-update profile if it exists
     if profile is not None:
@@ -378,6 +384,15 @@ def generate(analysis_path: str, output_path: str, config_path: str):
 
     config = load_config(config_path)
 
+    # Auto-discover latest run when using defaults
+    run_dir = None
+    if analysis_path == ".apptest/analysis.json" and output_path == ".apptest/tests.json":
+        run_dir = get_latest_run()
+        if run_dir is not None:
+            analysis_path = str(run_dir / "analysis.json")
+            output_path = str(run_dir / "tests.json")
+            click.echo(f"Using run: {run_dir.name}")
+
     click.echo(f"Generating tests for {config.app.name}")
     click.echo(f"Analysis: {analysis_path}")
     click.echo(f"LLM: {config.llm.provider}/{config.llm.model}")
@@ -485,6 +500,15 @@ def run(
         config.llm.model = model_override
     if provider_override:
         config.llm.provider = provider_override
+
+    # Auto-discover latest run when using defaults
+    run_dir = None
+    if tests_path == ".apptest/tests.json" and output_dir == ".apptest/results":
+        run_dir = get_latest_run()
+        if run_dir is not None:
+            tests_path = str(run_dir / "tests.json")
+            output_dir = str(run_dir)
+            click.echo(f"Using run: {run_dir.name}")
 
     click.echo(f"Running tests for {config.app.name} ({app_package})")
     click.echo(f"Tests:  {tests_path}")
