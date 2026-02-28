@@ -229,13 +229,45 @@ def generate_tests(analysis: dict, config: LLMConfig) -> GenerationResult:
 
 def _call_llm(user_message: str, system_prompt: str, config: LLMConfig) -> str:
     """Call the configured LLM provider and return the response text."""
-    if config.provider == "google":
+    if config.provider in ("moonshot", "kimi"):
+        return _call_moonshot(user_message, system_prompt, config)
+    elif config.provider == "google":
         return _call_google(user_message, system_prompt, config)
     else:
         raise ValueError(
             f"Unsupported LLM provider: '{config.provider}'. "
-            f"Supported: google"
+            f"Supported: moonshot, kimi, google"
         )
+
+
+def _call_moonshot(user_message: str, system_prompt: str, config: LLMConfig) -> str:
+    """Call Moonshot Kimi via the OpenAI-compatible API."""
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise ImportError(
+            "openai package is required for Moonshot/Kimi provider. "
+            "Install with: pip install openai"
+        )
+
+    api_key = config.api_key or os.environ.get("MOONSHOT_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "MOONSHOT_API_KEY environment variable is not set and no api_key in config. "
+            "Set it with: export MOONSHOT_API_KEY=your-key"
+        )
+
+    client = OpenAI(api_key=api_key, base_url="https://api.moonshot.ai/v1")
+
+    response = client.chat.completions.create(
+        model=config.model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        temperature=0.3,
+    )
+    return response.choices[0].message.content
 
 
 def _call_google(user_message: str, system_prompt: str, config: LLMConfig) -> str:

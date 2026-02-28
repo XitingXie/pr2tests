@@ -28,8 +28,8 @@ class SourceConfig:
 
 @dataclass
 class LLMConfig:
-    provider: str = "google"
-    model: str = "gemini-2.0-flash"
+    provider: str = "moonshot"
+    model: str = "kimi-k2.5"
     api_key: str = ""
 
 
@@ -124,8 +124,8 @@ def load_config(config_path: str | Path) -> Config:
             exclude_dirs=source_raw.get("exclude_dirs", default_exclude),
         ),
         llm=LLMConfig(
-            provider=raw.get("llm", {}).get("provider", "google"),
-            model=raw.get("llm", {}).get("model", "gemini-2.0-flash"),
+            provider=raw.get("llm", {}).get("provider", "moonshot"),
+            model=raw.get("llm", {}).get("model", "kimi-k2.5"),
             api_key=raw.get("llm", {}).get("api_key", ""),
         ),
         report=ReportConfig(

@@ -28,7 +28,7 @@ MAX_ACTIONS_PER_STEP = 15
 ACTION_WAIT_SECS = 1.5
 VERIFY_WAIT_SECS = 1.0
 STUCK_THRESHOLD = 3  # identical screenshots before recovery
-VERIFICATION_FALLBACK_MODEL = "gemini-3-flash-preview"
+VERIFICATION_FALLBACK_MODEL = "kimi-k2.5"
 
 _LAUNCH_KEYWORDS = ("open the app", "launch the app", "start the app")
 
@@ -93,6 +93,7 @@ def execute_test(
             if is_computer_use_model(config.model):
                 from copy import copy
                 verify_config = copy(config)
+                verify_config.provider = "moonshot"
                 verify_config.model = VERIFICATION_FALLBACK_MODEL
             sr = _run_verification_step(
                 step.index, step.text, device, verify_config, output_dir, test_id,

@@ -10,8 +10,8 @@ source:
   manifest: "app/src/main/AndroidManifest.xml"
 
 llm:
-  provider: google
-  model: gemini-2.0-flash
+  provider: moonshot
+  model: kimi-k2.5
 
 # report:
 #   trigger_mode: manual     # "manual", "daily", "count"
