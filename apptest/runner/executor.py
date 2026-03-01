@@ -44,6 +44,7 @@ def execute_test(
     trace: RunTrace | None = None,
     console: ConsoleLogger | None = None,
     registry: AgentRegistry | None = None,
+    apk_path: str | None = None,
 ) -> TestRunResult:
     """Execute a single test case on the device.
 
@@ -56,6 +57,7 @@ def execute_test(
         trace: Optional RunTrace to collect LLM interaction entries.
         console: Optional ConsoleLogger for real-time output.
         registry: Optional AgentRegistry for dispatching structured preconditions.
+        apk_path: Optional path to APK file for install preconditions.
 
     Returns:
         TestRunResult with per-step details.
@@ -82,8 +84,11 @@ def execute_test(
     legacy = [p for p in preconditions if isinstance(p, str)]
 
     if structured and registry:
+        shared_context = {"app_package": app_package}
+        if apk_path:
+            shared_context["apk_path"] = apk_path
         setup_log = registry.dispatch(
-            structured, device, {"app_package": app_package},
+            structured, device, shared_context,
         )
         for entry in setup_log:
             logger.info("  Setup: %s", entry)
@@ -714,6 +719,7 @@ def run_all_tests(
     app_package: str,
     device_serial: str = "emulator-5554",
     output_dir: str | Path | None = None,
+    apk_path: str | None = None,
     clear_data: bool = False,
     verbose: bool = False,
 ) -> RunSummary:
@@ -790,6 +796,7 @@ def run_all_tests(
         result = execute_test(
             tc, device, config, app_package, out_path,
             trace=trace, console=console, registry=registry,
+            apk_path=apk_path,
         )
         results.append(result)
         logger.info("  %s: %s", result.test_id, result.status)

@@ -308,9 +308,36 @@ def generate_tests(analysis: dict, config: LLMConfig, verbose: bool = False) -> 
     pr_label = f"PR: {pr_ref}"
     if pr_title:
         pr_label = f"PR #{pr_number}: {pr_title}" if pr_number else f"PR: {pr_title}"
+
+    # Extract repo URL and commit for build agent context
+    repo_url = analysis.get("repo_url", "")
+    commit = ""
+    if not repo_url and pr_url:
+        # Fallback: derive from PR URL (https://github.com/{owner}/{repo}/pull/{number})
+        parts = pr_url.rstrip("/").split("/")
+        pull_idx = next((i for i, p in enumerate(parts) if p == "pull"), -1)
+        if pull_idx >= 3:
+            repo_url = "/".join(parts[:pull_idx]) + ".git"
+    if pr_ref and ".." in pr_ref:
+        # diff_ref format: "af457ff^..af457ff" or "abc123..def456"
+        commit = pr_ref.split("..")[-1].strip()
+
+    build_context = ""
+    if repo_url or commit:
+        build_context = "\n## Build Context\n"
+        if repo_url:
+            build_context += f"Repository: {repo_url}\n"
+        if commit:
+            build_context += f"Commit: {commit}\n"
+        build_context += (
+            "Use these in build agent preconditions to checkout and build "
+            "the APK with the PR changes.\n"
+        )
+
     user_message = (
         f"App: {analysis.get('app_name', 'Unknown')} ({analysis.get('app_package', '')})\n"
-        f"{pr_label}\n\n"
+        f"{pr_label}\n"
+        f"{build_context}\n"
         f"{changes_text}"
     )
 

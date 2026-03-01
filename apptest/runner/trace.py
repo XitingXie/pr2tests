@@ -2,6 +2,7 @@
 
 import html
 import base64
+import typing
 from dataclasses import dataclass, field
 
 
@@ -29,9 +30,12 @@ class RunTrace:
     """Collection of trace entries for an entire test run."""
 
     entries: list[TraceEntry] = field(default_factory=list)
+    on_add: typing.Callable[[TraceEntry], None] | None = None
 
     def add(self, entry: TraceEntry) -> None:
         self.entries.append(entry)
+        if self.on_add:
+            self.on_add(entry)
 
 
 def generate_trace_html(trace: RunTrace, output_path: str) -> None:

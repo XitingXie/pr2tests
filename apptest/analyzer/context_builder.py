@@ -71,6 +71,10 @@ class AnalysisResult:
     test_changes: list[TestChangeContext] = field(default_factory=list)
     infra_changes: list[InfraChangeContext] = field(default_factory=list)
     all_activities: list[str] = field(default_factory=list)
+    pr_number: int | None = None
+    pr_title: str | None = None
+    pr_url: str | None = None
+    repo_url: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +434,9 @@ def build_context(
     app_package: str,
     diff_ref: str,
     profile: dict | None = None,
+    pr_number: int | None = None,
+    pr_title: str | None = None,
+    pr_url: str | None = None,
 ) -> AnalysisResult:
     """Classify every changed file and build per-type context.
 
@@ -445,6 +452,9 @@ def build_context(
         app_package: App package name.
         diff_ref: Git diff reference used.
         profile: Optional app profile for fast screen lookups.
+        pr_number: Optional PR number for metadata.
+        pr_title: Optional PR title for metadata.
+        pr_url: Optional PR URL for metadata.
     """
     # Pre-load strings.xml
     strings_path = repo_path / strings_file
@@ -458,12 +468,35 @@ def build_context(
     # Collect all changed file paths for PR-scoped screen narrowing
     pr_changed_files = {cf.path for cf in changed_files}
 
+    # Auto-detect repo URL from git remote if not derivable from pr_url
+    repo_url = None
+    if pr_url:
+        parts = pr_url.rstrip("/").split("/")
+        pull_idx = next((i for i, p in enumerate(parts) if p == "pull"), -1)
+        if pull_idx >= 3:
+            repo_url = "/".join(parts[:pull_idx]) + ".git"
+    if not repo_url:
+        import subprocess
+        try:
+            git_out = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=repo_path, capture_output=True, text=True, timeout=5,
+            )
+            if git_out.returncode == 0:
+                repo_url = git_out.stdout.strip()
+        except Exception:
+            pass
+
     result = AnalysisResult(
         app_name=app_name,
         app_package=app_package,
         diff_ref=diff_ref,
         total_changed_files=len(changed_files),
         all_activities=[a.name for a in activities],
+        pr_number=pr_number,
+        pr_title=pr_title,
+        pr_url=pr_url,
+        repo_url=repo_url,
     )
 
     for cf in classified:

@@ -21,11 +21,16 @@ the PR does not change.
 
 ## Important
 - The "description" field must contain ONLY user-facing actions (tap, type, scroll, navigate) \
-and verifications. The test framework handles app installation and launching automatically.
-- Any setup requirements (clean app data, specific device config, specific language, A/B test group) \
-must go in "preconditions", NOT as numbered steps in "description".
+and verifications. The framework launches the app automatically after preconditions run.
+- Any setup requirements (app installation, clean app data, specific device config, \
+specific language, A/B test group) must go in "preconditions", NOT as numbered steps in "description".
 - Start the description from the first meaningful user action (e.g., "Navigate to Settings", \
 "Tap the search bar").
+- For testing PR changes, preconditions should ensure the device runs the build with those changes. \
+Use the build agent to checkout the commit and build the APK, then install it. Example chain:
+  1. `build.checkout_and_build` (with commit and repo_url from the Build Context section)
+  2. `app.install` (reads apk_path from build output automatically)
+  3. `app.clear_data` (when fresh first-launch state is needed)
 
 ## Output Format
 Return a JSON array of test cases. Each test case has:
@@ -33,6 +38,8 @@ Return a JSON array of test cases. Each test case has:
 {{
   "id": "test_001",
   "preconditions": [
+    {{"agent": "build", "action": "checkout_and_build", "params": {{"commit": "<from Build Context>", "repo_url": "<from Build Context>"}}}},
+    {{"agent": "app", "action": "install"}},
     {{"agent": "app", "action": "clear_data"}},
     {{"agent": "device", "action": "set_locale", "params": {{"locale": "el"}}}}
   ],
@@ -59,12 +66,19 @@ test steps run. When a test requires specific device/app state, specify it in \
 ## Precondition Format
 Each precondition is a JSON object with "agent", "action", and optional "params":
 ```json
+{{"agent": "build", "action": "checkout_and_build", "params": {{"commit": "af457ff", "repo_url": "https://github.com/owner/repo.git"}}}}
+{{"agent": "app", "action": "install"}}
 {{"agent": "app", "action": "clear_data"}}
 {{"agent": "device", "action": "set_locale", "params": {{"locale": "el"}}}}
 ```
 
-Preconditions execute in order. Agents share context — e.g., build produces apk_path, \
+Preconditions execute in order. Agents share context — build produces `apk_path`, \
 app.install reads it automatically.
+
+**Always start with `build.checkout_and_build`** using the commit and repo_url from \
+the Build Context section. Then `app.install` to install the built APK. \
+Add `app.clear_data` after install when the test needs a fresh first-launch state \
+(e.g., onboarding flows, first-run prompts).
 
 Only use agents listed above. If a requirement can't be handled by any agent \
 (e.g., "user must be in A/B test group"), put it as a string note instead.

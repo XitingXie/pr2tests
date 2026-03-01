@@ -8,6 +8,12 @@ _VERIFICATION_PREFIXES = (
     "validate", "expect", "should",
 )
 
+# Steps the framework handles automatically — skip if LLM generates them.
+_SKIP_KEYWORDS = (
+    "fresh install", "install the app", "reinstall",
+    "open the app", "launch the app", "start the app",
+)
+
 _NUMBERED_STEP = re.compile(r"^\s*(\d+)\.\s+(.+)", re.MULTILINE)
 
 
@@ -40,12 +46,20 @@ def parse_test_steps(description: str) -> list[ParsedStep]:
     steps: list[ParsedStep] = []
     for idx_str, text in matches:
         text = text.strip()
+        if _should_skip(text):
+            continue
         steps.append(ParsedStep(
             index=int(idx_str),
             text=text,
             is_verification=_is_verification(text),
         ))
     return steps
+
+
+def _should_skip(text: str) -> bool:
+    """Check if a step should be skipped (handled by the framework)."""
+    lower = text.lower()
+    return any(kw in lower for kw in _SKIP_KEYWORDS)
 
 
 def _is_verification(text: str) -> bool:

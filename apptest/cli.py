@@ -22,6 +22,8 @@ from .reporter.report_collector import (
 )
 from .reporter.report_index import add_to_index
 from .reporter.report_schema import TriggerInfo
+from .comparator import format_summary, run_comparison, write_comparison
+from .quickstart import run_quickstart
 from .run_manager import create_run_dir, get_latest_run
 from .scanner.profile_manager import load_effective_profile, save_profile
 from .scanner.project_scanner import scan_project
@@ -31,6 +33,29 @@ from .scanner.project_scanner import scan_project
 def main():
     """AppTest — AI-powered test generation from PR diffs."""
     pass
+
+
+@main.command()
+@click.option(
+    "--repo",
+    "repo_path",
+    type=click.Path(exists=True, file_okay=False),
+    default=".",
+    help="Path to the repository root.",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(),
+    default="apptest.yml",
+    help="Config output path.",
+)
+@click.option("--force", is_flag=True, help="Overwrite existing config.")
+def quickstart(repo_path: str, config_path: str, force: bool):
+    """Detect project structure and generate config + profile in one step."""
+    repo = Path(repo_path).resolve()
+    cfg = Path(config_path) if config_path != "apptest.yml" else None
+    run_quickstart(repo, config_path=cfg, force=force)
 
 
 @main.command()
@@ -119,7 +144,11 @@ def init(repo_path: str, config_path: str | None):
     default=".apptest",
     help="Output directory for analysis results.",
 )
-def analyze(diff_ref: str, repo_path: str, config_path: str, output_dir: str):
+@click.option("--pr-number", "pr_number", type=int, default=None, help="PR number for metadata.")
+@click.option("--pr-title", "pr_title", default=None, help="PR title for metadata.")
+@click.option("--pr-url", "pr_url", default=None, help="PR URL for metadata.")
+def analyze(diff_ref: str, repo_path: str, config_path: str, output_dir: str,
+            pr_number: int | None, pr_title: str | None, pr_url: str | None):
     """Analyze a PR diff and classify all changes."""
     repo = Path(repo_path).resolve()
     config = load_config(config_path)
@@ -177,6 +206,9 @@ def analyze(diff_ref: str, repo_path: str, config_path: str, output_dir: str):
         app_package=config.app.package,
         diff_ref=diff_ref,
         profile=profile,
+        pr_number=pr_number,
+        pr_title=pr_title,
+        pr_url=pr_url,
     )
 
     # Write output — auto-create run dir when using default output
@@ -395,7 +427,13 @@ def report(
     default="apptest.yml",
     help="Path to apptest.yml config file.",
 )
-def generate(analysis_path: str, output_path: str, config_path: str):
+@click.option(
+    "-v", "--verbose",
+    is_flag=True,
+    default=False,
+    help="Print LLM request/response timing to console.",
+)
+def generate(analysis_path: str, output_path: str, config_path: str, verbose: bool):
     """Generate test steps from PR analysis using an LLM."""
     import json
 
@@ -429,7 +467,7 @@ def generate(analysis_path: str, output_path: str, config_path: str):
 
     # Generate tests
     click.echo("[2/3] Calling LLM to generate test steps...")
-    result = generate_tests(analysis, config.llm)
+    result = generate_tests(analysis, config.llm, verbose=verbose)
 
     # Write output
     click.echo("[3/3] Writing results...")
@@ -478,6 +516,13 @@ def generate(analysis_path: str, output_path: str, config_path: str):
     help="Override app package name from config.",
 )
 @click.option(
+    "--apk",
+    "apk_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to APK file to install before running tests.",
+)
+@click.option(
     "--clear-data",
     "clear_data",
     is_flag=True,
@@ -496,15 +541,23 @@ def generate(analysis_path: str, output_path: str, config_path: str):
     default=None,
     help="Override LLM provider (moonshot, google, or openai).",
 )
+@click.option(
+    "-v", "--verbose",
+    is_flag=True,
+    default=False,
+    help="Print real-time events (LLM calls, screenshots, actions) to console.",
+)
 def run(
     tests_path: str,
     output_dir: str,
     config_path: str,
     device_serial: str,
     package_override: str | None,
+    apk_path: str | None,
     clear_data: bool,
     model_override: str | None,
     provider_override: str | None,
+    verbose: bool,
 ):
     """Run generated tests on an Android device/emulator."""
     from .runner.executor import run_all_tests
@@ -541,7 +594,9 @@ def run(
             app_package=app_package,
             device_serial=device_serial,
             output_dir=output_dir,
+            apk_path=apk_path,
             clear_data=clear_data,
+            verbose=verbose,
         )
     except RuntimeError as e:
         click.echo(f"\nError: {e}", err=True)
@@ -563,3 +618,84 @@ def run(
         click.echo(f"  [{icon}] {r.test_id}")
         if r.failure_reason:
             click.echo(f"         {r.failure_reason}")
+
+
+@main.command()
+@click.option("--before", required=False, help="Git ref for before state.")
+@click.option("--after", required=False, help="Git ref for after state.")
+@click.option(
+    "--pr",
+    required=False,
+    help="PR commit ref (shorthand for --before ref~1 --after ref).",
+)
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    help="Path to apptest.yml config file.",
+)
+@click.option(
+    "--generate",
+    is_flag=True,
+    help="Also generate and compare tests (requires LLM access).",
+)
+@click.option(
+    "--output",
+    default=None,
+    help="Output path for comparison JSON.",
+)
+@click.option(
+    "--repo",
+    "repo_path",
+    type=click.Path(exists=True, file_okay=False),
+    default=".",
+    help="Path to the git repository.",
+)
+def compare(
+    before: str | None,
+    after: str | None,
+    pr: str | None,
+    config_path: str,
+    generate: bool,
+    output: str | None,
+    repo_path: str,
+):
+    """Compare analysis/tests between two git refs."""
+    repo = Path(repo_path).resolve()
+
+    # Handle --pr shorthand
+    if pr:
+        if before or after:
+            click.echo("Error: --pr cannot be used with --before/--after.", err=True)
+            raise SystemExit(1)
+        before = f"{pr}~1"
+        after = pr
+    elif not before or not after:
+        click.echo("Error: either --pr or both --before and --after are required.", err=True)
+        raise SystemExit(1)
+
+    click.echo(f"Comparing {before} -> {after}")
+    click.echo(f"Repo: {repo}")
+    if generate:
+        click.echo("Test generation: enabled")
+
+    click.echo("\nRunning comparison...")
+    try:
+        result = run_comparison(
+            repo=repo,
+            before_ref=before,
+            after_ref=after,
+            config_path=Path(config_path),
+            generate=generate,
+        )
+    except Exception as e:
+        click.echo(f"\nError during comparison: {e}", err=True)
+        raise SystemExit(1)
+
+    # Print summary
+    click.echo(f"\n{result.summary}")
+
+    # Write output if requested
+    if output:
+        out_path = write_comparison(result, Path(output))
+        click.echo(f"\nComparison written to {out_path}")
