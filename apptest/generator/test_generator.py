@@ -12,6 +12,7 @@ from pathlib import Path
 import click
 
 from ..config import LLMConfig
+from ..llm_retry import retry_llm_call
 from .prompts import AGENT_CAPABILITIES, LOGIC_ONLY_ADDENDUM, TEST_GENERATION_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,9 @@ class GenerationResult:
 # ---------------------------------------------------------------------------
 
 _MAX_SOURCE_LINES = 100
+# Rough token budget for the changes section of the prompt.
+# 1 token ≈ 4 chars. Keep total prompt under 80k tokens (~320k chars).
+_MAX_CHANGES_CHARS = 100_000
 
 
 def _truncate_source(source: str, max_lines: int = _MAX_SOURCE_LINES) -> str:
@@ -58,19 +62,35 @@ def _truncate_source(source: str, max_lines: int = _MAX_SOURCE_LINES) -> str:
     return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
 
 
-def _format_changes(analysis: dict) -> str:
-    """Format analysis dict into readable sections for the LLM prompt."""
-    sections: list[str] = []
+def _estimate_chars(text: str) -> int:
+    return len(text)
 
-    # --- UI changes ---
+
+def _format_changes(analysis: dict) -> str:
+    """Format analysis dict into readable sections for the LLM prompt.
+
+    Applies a character budget to prevent prompt overflow for large PRs.
+    Priority: UI changes > logic changes (diffs only) > screen context.
+    Full source is dropped first, then screen context, then diffs are truncated.
+    """
+    sections: list[str] = []
+    budget = _MAX_CHANGES_CHARS
+    used = 0
+
+    # --- UI changes (highest priority, but large diffs are truncated) ---
     ui_changes = analysis.get("ui_changes", [])
     if ui_changes:
         parts = ["## UI Changes"]
         for i, ch in enumerate(ui_changes, 1):
             parts.append(f"\n### UI Change {i}: {ch['file']}")
             parts.append(f"Type: {ch['type']}")
-            if ch.get("diff"):
-                parts.append(f"Diff:\n```\n{ch['diff']}\n```")
+            diff = ch.get("diff", "")
+            if diff:
+                # Truncate large diffs (e.g. generated drawables, SVGs)
+                diff_lines = diff.splitlines()
+                if len(diff_lines) > 60:
+                    diff = "\n".join(diff_lines[:60]) + f"\n... ({len(diff_lines) - 60} more lines)"
+                parts.append(f"Diff:\n```\n{diff}\n```")
             screens = ch.get("affected_screens", [])
             if screens:
                 names = [Path(s).stem for s in screens]
@@ -79,44 +99,85 @@ def _format_changes(analysis: dict) -> str:
             if strings:
                 str_lines = [f"  {k}: {v}" for k, v in strings.items()]
                 parts.append("Related strings:\n" + "\n".join(str_lines))
-        sections.append("\n".join(parts))
+        section = "\n".join(parts)
+        used += _estimate_chars(section)
+        sections.append(section)
 
-    # --- Logic changes ---
+    # --- Logic changes (may be truncated for large PRs) ---
     logic_changes = analysis.get("logic_changes", [])
     if logic_changes:
+        remaining = budget - used
         parts = ["## Logic Changes"]
+        truncated_count = 0
+
         for i, ch in enumerate(logic_changes, 1):
-            parts.append(f"\n### Logic Change {i}: {ch['file']}")
-            parts.append(f"Type: {ch['type']}")
-            parts.append(f"Change nature: {ch['change_nature']}")
-            if ch.get("diff"):
-                parts.append(f"Diff:\n```\n{ch['diff']}\n```")
-            if ch.get("full_source"):
-                parts.append(
+            entry_parts = [
+                f"\n### Logic Change {i}: {ch['file']}",
+                f"Type: {ch['type']}",
+                f"Change nature: {ch['change_nature']}",
+            ]
+            diff = ch.get("diff", "")
+            if diff:
+                diff_lines = diff.splitlines()
+                if len(diff_lines) > 80:
+                    diff = "\n".join(diff_lines[:80]) + f"\n... ({len(diff_lines) - 80} more lines)"
+                entry_parts.append(f"Diff:\n```\n{diff}\n```")
+
+            # Include full_source only if plenty of budget remains
+            if ch.get("full_source") and remaining > budget * 0.5:
+                entry_parts.append(
                     f"Full source (context):\n```\n{_truncate_source(ch['full_source'])}\n```"
                 )
+
             chain = ch.get("dependency_chain", [])
             if chain:
                 chain_names = [Path(c).stem for c in chain]
-                parts.append(f"Dependency chain: {' → '.join(chain_names)}")
+                entry_parts.append(f"Dependency chain: {' → '.join(chain_names)}")
             screens = ch.get("affected_screens", [])
             if screens:
                 names = [Path(s).stem for s in screens]
-                parts.append(f"Affected screens: {', '.join(names)}")
-            for ctx in ch.get("screen_context", []):
-                screen_name = Path(ctx.get("screen_file", "")).stem
-                parts.append(f"\nScreen context ({screen_name}):")
-                if ctx.get("layout"):
-                    parts.append(f"Layout ({ctx.get('layout_file', 'unknown')}):\n```xml\n{ctx['layout']}\n```")
+                entry_parts.append(f"Affected screens: {', '.join(names)}")
+
+            # Include screen context only if plenty of budget remains
+            if remaining > budget * 0.5:
+                for ctx in ch.get("screen_context", []):
+                    screen_name = Path(ctx.get("screen_file", "")).stem
+                    entry_parts.append(f"\nScreen context ({screen_name}):")
+                    if ctx.get("layout"):
+                        entry_parts.append(
+                            f"Layout ({ctx.get('layout_file', 'unknown')}):\n```xml\n{ctx['layout']}\n```"
+                        )
+
+            entry = "\n".join(entry_parts)
+            entry_len = _estimate_chars(entry)
+
+            if used + entry_len > budget:
+                truncated_count += 1
+                # Include a minimal summary instead
+                summary = (
+                    f"\n### Logic Change {i}: {ch['file']}\n"
+                    f"Type: {ch['type']} | Change nature: {ch['change_nature']}"
+                )
+                if screens:
+                    summary += f" | Screens: {', '.join([Path(s).stem for s in screens])}"
+                parts.append(summary)
+                used += _estimate_chars(summary)
+            else:
+                parts.append(entry)
+                used += entry_len
+                remaining = budget - used
+
+        if truncated_count:
+            parts.append(f"\n*({truncated_count} logic change(s) summarized to fit token budget)*")
         sections.append("\n".join(parts))
 
     # --- Test changes ---
     test_changes = analysis.get("test_changes", [])
-    if test_changes:
+    if test_changes and used < budget:
         parts = ["## Existing Test Changes (informational)"]
         for ch in test_changes:
             parts.append(f"- {ch['file']}")
-            if ch.get("diff"):
+            if ch.get("diff") and used < budget - 10_000:
                 parts.append(f"```\n{ch['diff']}\n```")
         sections.append("\n".join(parts))
 
@@ -282,13 +343,16 @@ def _call_llm(user_message: str, system_prompt: str, config: LLMConfig) -> str:
         return _call_moonshot(user_message, system_prompt, config)
     elif config.provider == "google":
         return _call_google(user_message, system_prompt, config)
+    elif config.provider == "openai":
+        return _call_openai(user_message, system_prompt, config)
     else:
         raise ValueError(
             f"Unsupported LLM provider: '{config.provider}'. "
-            f"Supported: moonshot, kimi, google"
+            f"Supported: moonshot, kimi, google, openai"
         )
 
 
+@retry_llm_call
 def _call_moonshot(user_message: str, system_prompt: str, config: LLMConfig) -> str:
     """Call Moonshot Kimi via the OpenAI-compatible API."""
     try:
@@ -322,6 +386,38 @@ def _call_moonshot(user_message: str, system_prompt: str, config: LLMConfig) -> 
     return response.choices[0].message.content
 
 
+@retry_llm_call
+def _call_openai(user_message: str, system_prompt: str, config: LLMConfig) -> str:
+    """Call OpenAI via the OpenAI SDK."""
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise ImportError(
+            "openai package is required for OpenAI provider. "
+            "Install with: pip install openai"
+        )
+
+    api_key = config.api_key or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "OPENAI_API_KEY environment variable is not set and no api_key in config. "
+            "Set it with: export OPENAI_API_KEY=your-key"
+        )
+
+    client = OpenAI(api_key=api_key)
+
+    response = client.chat.completions.create(
+        model=config.model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        temperature=0.3,
+    )
+    return response.choices[0].message.content
+
+
+@retry_llm_call
 def _call_google(user_message: str, system_prompt: str, config: LLMConfig) -> str:
     """Call Google Gemini via the google-genai SDK."""
     try:

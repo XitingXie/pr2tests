@@ -7,6 +7,7 @@ import os
 import re
 
 from ..config import LLMConfig
+from ..llm_retry import retry_llm_call
 from .prompts import ACTION_PROMPT, VERIFICATION_PROMPT
 from .schemas import Action, ActionType
 
@@ -133,6 +134,7 @@ def _call_vision(prompt: str, image_png: bytes, config: LLMConfig) -> str:
     return _call_vision_google(prompt, image_png, config)
 
 
+@retry_llm_call
 def _call_vision_google(prompt: str, image_png: bytes, config: LLMConfig) -> str:
     """Google Gemini multimodal call."""
     from google import genai
@@ -152,6 +154,7 @@ def _call_vision_google(prompt: str, image_png: bytes, config: LLMConfig) -> str
     return response.text
 
 
+@retry_llm_call
 def _call_vision_openai(prompt: str, image_png: bytes, config: LLMConfig) -> str:
     """OpenAI multimodal call (GPT-4o, etc.)."""
     api_key = config.api_key or os.environ.get("OPENAI_API_KEY")
@@ -183,6 +186,12 @@ def _get_moonshot_client(config: LLMConfig):
     if not api_key:
         raise ValueError("MOONSHOT_API_KEY environment variable is not set.")
     return _get_client(api_key, provider="moonshot")
+
+
+@retry_llm_call
+def _chat_completion_with_retry(client, **kwargs):
+    """Wrapper around client.chat.completions.create with retry on transient errors."""
+    return client.chat.completions.create(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +255,8 @@ def _decide_action_moonshot(
     if not use_thinking:
         extra["extra_body"] = {"thinking": {"type": "disabled"}}
 
-    response = client.chat.completions.create(
+    response = _chat_completion_with_retry(
+        client,
         model=config.model,
         messages=[
             {"role": "system", "content": _KIMI_ACTION_SYSTEM},
@@ -346,7 +356,8 @@ def _verify_step_moonshot(
         device_context=f"Device context: {device_context}\n" if device_context else "",
     )
 
-    response = client.chat.completions.create(
+    response = _chat_completion_with_retry(
+        client,
         model=config.model,
         messages=[
             {"role": "system", "content": _KIMI_VERIFY_SYSTEM},
