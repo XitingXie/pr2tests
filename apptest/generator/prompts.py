@@ -19,20 +19,55 @@ the PR does not change.
 - Include any specific test data (search terms, input values, etc.) needed to reproduce.
 - Prioritize: high = must-test before release, medium = should-test, low = nice-to-test.
 
+## Important
+- The "description" field must contain ONLY user-facing actions (tap, type, scroll, navigate) \
+and verifications. The test framework handles app installation and launching automatically.
+- Any setup requirements (clean app data, specific device config, specific language, A/B test group) \
+must go in "preconditions", NOT as numbered steps in "description".
+- Start the description from the first meaningful user action (e.g., "Navigate to Settings", \
+"Tap the search bar").
+
 ## Output Format
 Return a JSON array of test cases. Each test case has:
 ```json
-{
+{{
   "id": "test_001",
-  "description": "Step-by-step user actions, one line per step:\\n1. Open the app\\n2. Navigate to Search\\n3. Type 'example'\\n4. Verify results appear",
+  "preconditions": [
+    {{"agent": "app", "action": "clear_data"}},
+    {{"agent": "device", "action": "set_locale", "params": {{"locale": "el"}}}}
+  ],
+  "description": "Step-by-step user actions, one line per step:\\n1. Navigate to Search\\n2. Type 'example'\\n3. Verify results appear",
   "covers": "Brief description of what aspect of the change this tests",
   "change_type": "new_feature|bug_fix|regression|error_case|edge_case",
   "priority": "high|medium|low",
-  "test_data": {"search_term": "example", "expected_count": 10}
-}
+  "test_data": {{"search_term": "example", "expected_count": 10}}
+}}
 ```
 
 Return ONLY the JSON array, no markdown fences, no extra text.
+"""
+
+AGENT_CAPABILITIES = """\
+
+## Available Setup Agents
+The test framework has setup agents that handle system-level operations before your \
+test steps run. When a test requires specific device/app state, specify it in \
+"preconditions" as structured agent instructions instead of numbered steps.
+
+{agent_descriptions}
+
+## Precondition Format
+Each precondition is a JSON object with "agent", "action", and optional "params":
+```json
+{{"agent": "app", "action": "clear_data"}}
+{{"agent": "device", "action": "set_locale", "params": {{"locale": "el"}}}}
+```
+
+Preconditions execute in order. Agents share context — e.g., build produces apk_path, \
+app.install reads it automatically.
+
+Only use agents listed above. If a requirement can't be handled by any agent \
+(e.g., "user must be in A/B test group"), put it as a string note instead.
 """
 
 LOGIC_ONLY_ADDENDUM = """

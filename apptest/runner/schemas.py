@@ -11,6 +11,10 @@ class ActionType(str, Enum):
     TYPE = "type"
     SWIPE_UP = "swipe_up"
     SWIPE_DOWN = "swipe_down"
+    SWIPE_LEFT = "swipe_left"
+    SWIPE_RIGHT = "swipe_right"
+    LONG_PRESS = "long_press"
+    DRAG = "drag"
     BACK = "back"
     HOME = "home"
     ENTER = "enter"
@@ -26,6 +30,8 @@ class Action:
     action_type: ActionType
     x: int = 0
     y: int = 0
+    x2: int = 0  # drag endpoint
+    y2: int = 0  # drag endpoint
     text: str = ""
     reasoning: str = ""
     duration_ms: int = 0

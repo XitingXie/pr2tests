@@ -158,7 +158,32 @@ class ADBDevice:
         """Press the enter key."""
         self._run_check(["shell", "input", "keyevent", "KEYCODE_ENTER"])
 
+    def long_press(self, x: int, y: int, duration_ms: int = 800) -> None:
+        """Long-press at (x, y) via swipe-in-place with long duration."""
+        self._run_check([
+            "shell", "input", "swipe",
+            str(x), str(y), str(x), str(y), str(duration_ms),
+        ])
+
+    def swipe_left(self) -> None:
+        """Swipe left from right-center to left-center."""
+        w, h = self.get_screen_size()
+        self.swipe(w * 3 // 4, h // 2, w // 4, h // 2)
+
+    def swipe_right(self) -> None:
+        """Swipe right from left-center to right-center."""
+        w, h = self.get_screen_size()
+        self.swipe(w // 4, h // 2, w * 3 // 4, h // 2)
+
     # ---- App management ----
+
+    def install(self, apk_path: str) -> None:
+        """Install an APK (replace if exists)."""
+        self._run_check(["install", "-r", apk_path], timeout=120)
+
+    def uninstall(self, package: str) -> None:
+        """Uninstall an app. No error if not installed."""
+        self._run(["uninstall", package], timeout=30)
 
     def launch_app(self, package: str) -> None:
         """Launch an app by package name using monkey."""
@@ -174,6 +199,16 @@ class ADBDevice:
     def clear_app_data(self, package: str) -> None:
         """Clear all app data."""
         self._run_check(["shell", "pm", "clear", package])
+
+    def set_locale(self, locale: str) -> None:
+        """Change device locale (e.g. 'el', 'en-US')."""
+        self._run_check([
+            "shell", "settings", "put", "system", "system_locales", locale,
+        ])
+
+    def set_setting(self, key: str, value: str) -> None:
+        """Change a system setting via ``adb shell settings put system``."""
+        self._run_check(["shell", "settings", "put", "system", key, value])
 
     # ---- Device info ----
 

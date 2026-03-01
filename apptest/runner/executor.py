@@ -8,6 +8,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..agents import AgentRegistry
 from ..config import LLMConfig
 from .adb import ADBDevice
 from .schemas import (
@@ -19,6 +20,7 @@ from .schemas import (
 )
 from .step_parser import parse_test_steps
 from .computer_use import ComputerUseSession, is_computer_use_model
+from .console_logger import ConsoleLogger
 from .trace import RunTrace, TraceEntry, generate_trace_html
 from .vision import decide_action, verify_step
 
@@ -40,6 +42,8 @@ def execute_test(
     app_package: str,
     output_dir: Path | None = None,
     trace: RunTrace | None = None,
+    console: ConsoleLogger | None = None,
+    registry: AgentRegistry | None = None,
 ) -> TestRunResult:
     """Execute a single test case on the device.
 
@@ -50,22 +54,59 @@ def execute_test(
         app_package: Android package name (e.g. "org.wikipedia").
         output_dir: Optional directory to save screenshots.
         trace: Optional RunTrace to collect LLM interaction entries.
+        console: Optional ConsoleLogger for real-time output.
+        registry: Optional AgentRegistry for dispatching structured preconditions.
 
     Returns:
         TestRunResult with per-step details.
     """
+    if console is None:
+        console = ConsoleLogger(enabled=False)
+
     test_id = test_case.get("id", "unknown")
     description = test_case.get("description", "")
     logger.info("Running test: %s", test_id)
+    console.test_start(test_id)
 
     start_time = time.monotonic()
 
-    # Reset app between tests (force-stop only — data preserved to avoid
-    # re-doing onboarding wizards every test).
+    # Framework handles app lifecycle: stop, apply preconditions, launch.
     try:
         device.force_stop(app_package)
     except RuntimeError as e:
         logger.warning("Failed to stop app: %s", e)
+
+    # Dispatch structured preconditions to setup agents
+    preconditions = test_case.get("preconditions", [])
+    structured = [p for p in preconditions if isinstance(p, dict)]
+    legacy = [p for p in preconditions if isinstance(p, str)]
+
+    if structured and registry:
+        setup_log = registry.dispatch(
+            structured, device, {"app_package": app_package},
+        )
+        for entry in setup_log:
+            logger.info("  Setup: %s", entry)
+            console.log(entry)
+
+    # Legacy string preconditions: keyword-based clear data
+    needs_clear = any(
+        kw in p.lower()
+        for p in legacy
+        for kw in ("fresh", "clean", "clear data", "first launch", "first run")
+    )
+    if needs_clear:
+        logger.info("  Precondition: clearing app data for %s", app_package)
+        try:
+            device.clear_app_data(app_package)
+        except RuntimeError as e:
+            logger.warning("Failed to clear app data: %s", e)
+
+    try:
+        device.launch_app(app_package)
+        time.sleep(ACTION_WAIT_SECS)
+    except RuntimeError as e:
+        logger.warning("Failed to launch app: %s", e)
 
     # Parse steps
     parsed_steps = parse_test_steps(description)
@@ -85,6 +126,7 @@ def execute_test(
     for step in parsed_steps:
         step_start = time.monotonic()
         logger.info("  Step %d: %s", step.index, step.text)
+        console.step_start(step.index, step.text, step.is_verification)
 
         if step.is_verification:
             # Computer use model requires computer_use tool on every call,
@@ -97,19 +139,19 @@ def execute_test(
                 verify_config.model = VERIFICATION_FALLBACK_MODEL
             sr = _run_verification_step(
                 step.index, step.text, device, verify_config, output_dir, test_id,
-                trace=trace,
+                trace=trace, console=console,
             )
         elif is_computer_use_model(config.model):
             sr = _run_action_step_computer_use(
                 step.index, step.text, device, config,
                 app_package, screen_w, screen_h, output_dir, test_id,
-                trace=trace,
+                trace=trace, console=console,
             )
         else:
             sr = _run_action_step(
                 step.index, step.text, device, config,
                 app_package, screen_w, screen_h, output_dir, test_id,
-                trace=trace,
+                trace=trace, console=console,
             )
 
         sr.duration_ms = _elapsed_ms(step_start)
@@ -126,11 +168,14 @@ def execute_test(
         if failed_step:
             failure_reason = f"Step {failed_step.step_index}: {failed_step.failure_reason}"
 
+    total_ms = _elapsed_ms(start_time)
+    console.test_end(test_id, status, total_ms)
+
     return TestRunResult(
         test_id=test_id,
         status=status,
         steps=step_results,
-        total_duration_ms=_elapsed_ms(start_time),
+        total_duration_ms=total_ms,
         failure_reason=failure_reason,
     )
 
@@ -146,13 +191,18 @@ def _run_action_step(
     output_dir: Path | None,
     test_id: str,
     trace: RunTrace | None = None,
+    console: ConsoleLogger | None = None,
 ) -> StepResult:
     """Execute an action step by looping: screenshot → LLM → action."""
+    if console is None:
+        console = ConsoleLogger(enabled=False)
+
     actions: list[Action] = []
 
     # Special case: "open the app" / "launch the app"
     if any(kw in step_text.lower() for kw in _LAUNCH_KEYWORDS):
         device.launch_app(app_package)
+        console.action_launch(app_package)
         time.sleep(ACTION_WAIT_SECS)
         actions.append(Action(
             action_type=ActionType.LAUNCH,
@@ -166,32 +216,58 @@ def _run_action_step(
         )
 
     prev_screenshots: list[bytes] = []
+    stuck_count = 0
 
     for i in range(MAX_ACTIONS_PER_STEP):
         # Take screenshot
         png = device.screenshot_bytes()
+        console.screenshot_taken()
         if output_dir:
             _save_screenshot(output_dir, test_id, step_index, i, png)
 
         # Stuck detection: 3 identical screenshots in a row
         if _is_stuck(png, prev_screenshots):
-            logger.warning("  Stuck detected, attempting recovery")
-            # Check if we're still in the app — if not, relaunch instead of back
+            stuck_count += 1
+            logger.warning("  Stuck detected (count=%d), attempting recovery", stuck_count)
+
+            # Fail fast after 3 stuck recoveries — we're in a loop
+            if stuck_count >= 3:
+                return StepResult(
+                    step_index=step_index,
+                    step_text=step_text,
+                    status="failed",
+                    actions=actions,
+                    failure_reason="Stuck in recovery loop after 3 attempts",
+                )
+
+            # Check if we're still in the app — if not, relaunch
             fg = device.get_foreground_package()
             if fg and fg != app_package:
                 logger.warning("  App not in foreground (%s), relaunching %s", fg, app_package)
+                console.stuck_detected(f"app left foreground ({fg}), relaunching")
                 device.launch_app(app_package)
                 time.sleep(ACTION_WAIT_SECS)
                 actions.append(Action(
                     action_type=ActionType.LAUNCH,
                     reasoning=f"Recovery: app left foreground ({fg}), relaunched",
                 ))
+            elif stuck_count == 1:
+                # First stuck: try scrolling instead of back
+                console.stuck_detected("scroll to reveal elements")
+                device.swipe(screen_w // 2, screen_h * 2 // 3, screen_w // 2, screen_h // 3)
+                time.sleep(ACTION_WAIT_SECS)
+                actions.append(Action(
+                    action_type=ActionType.SWIPE_UP,
+                    reasoning="Recovery: stuck detected, trying scroll to reveal elements",
+                ))
             else:
+                # Second stuck: press back as escalation
+                console.stuck_detected("escalated to back")
                 device.press_back()
                 time.sleep(ACTION_WAIT_SECS)
                 actions.append(Action(
                     action_type=ActionType.BACK,
-                    reasoning="Recovery: stuck detected (identical screenshots)",
+                    reasoning="Recovery: stuck detected (escalated to back)",
                 ))
                 # Back may have left the app — check and relaunch if needed
                 fg = device.get_foreground_package()
@@ -212,6 +288,22 @@ def _run_action_step(
 
         # Gather device context (keyboard state) for the LLM
         device_context = _gather_device_context(device, step_text)
+
+        # Build action history so LLM can avoid repeating failed actions
+        if actions:
+            recent = actions[-5:]
+            history_lines = []
+            for a in recent:
+                if a.action_type == ActionType.TAP:
+                    history_lines.append(f"  - tap at ({a.x},{a.y}): {a.reasoning}")
+                elif a.action_type == ActionType.TYPE:
+                    history_lines.append(f"  - type '{a.text}': {a.reasoning}")
+                elif a.action_type in (ActionType.BACK, ActionType.LAUNCH):
+                    history_lines.append(f"  - {a.action_type.value}: {a.reasoning}")
+                else:
+                    history_lines.append(f"  - {a.action_type.value}: {a.reasoning}")
+            device_context += "\nPrevious actions this step:\n" + "\n".join(history_lines)
+            device_context += "\nDo NOT repeat the same action if the screen did not change."
 
         # Ask LLM what to do — capture trace
         capture: list[dict] | None = [] if trace is not None else None
@@ -262,6 +354,9 @@ def _run_action_step(
 
         # Execute the action on device
         _execute_action(device, action, app_package)
+        console.action_executed(
+            action.action_type.value, x=action.x, y=action.y, text=action.text,
+        )
         time.sleep(ACTION_WAIT_SECS)
 
         # Guard: if back/other action navigated us out of the app, relaunch
@@ -297,13 +392,18 @@ def _run_action_step_computer_use(
     output_dir: Path | None,
     test_id: str,
     trace: RunTrace | None = None,
+    console: ConsoleLogger | None = None,
 ) -> StepResult:
     """Execute an action step using Gemini computer use (structured tool calls)."""
+    if console is None:
+        console = ConsoleLogger(enabled=False)
+
     actions: list[Action] = []
 
     # Special case: "open the app" / "launch the app"
     if any(kw in step_text.lower() for kw in _LAUNCH_KEYWORDS):
         device.launch_app(app_package)
+        console.action_launch(app_package)
         time.sleep(ACTION_WAIT_SECS)
         actions.append(Action(
             action_type=ActionType.LAUNCH,
@@ -330,6 +430,7 @@ def _run_action_step_computer_use(
 
     # Initial screenshot
     png = device.screenshot_bytes()
+    console.screenshot_taken()
     screenshot_counter = 0
     if output_dir:
         _save_screenshot(output_dir, test_id, step_index, screenshot_counter, png)
@@ -385,6 +486,9 @@ def _run_action_step_computer_use(
                 break
 
             _execute_action(device, action, app_package)
+            console.action_executed(
+                action.action_type.value, x=action.x, y=action.y, text=action.text,
+            )
             time.sleep(0.5)
 
         if step_done:
@@ -401,6 +505,7 @@ def _run_action_step_computer_use(
         # Wait and take new screenshot after executing all sub-actions
         time.sleep(ACTION_WAIT_SECS)
         png = device.screenshot_bytes()
+        console.screenshot_taken()
         if output_dir:
             _save_screenshot(output_dir, test_id, step_index, screenshot_counter, png)
             screenshot_counter += 1
@@ -459,10 +564,15 @@ def _run_verification_step(
     output_dir: Path | None,
     test_id: str,
     trace: RunTrace | None = None,
+    console: ConsoleLogger | None = None,
 ) -> StepResult:
     """Execute a verification step: screenshot → LLM assertion."""
+    if console is None:
+        console = ConsoleLogger(enabled=False)
+
     time.sleep(VERIFY_WAIT_SECS)
     png = device.screenshot_bytes()
+    console.screenshot_taken()
     if output_dir:
         _save_screenshot(output_dir, test_id, step_index, 0, png)
 
@@ -551,6 +661,14 @@ def _execute_action(device: ADBDevice, action: Action, app_package: str) -> None
         device.swipe_up()
     elif t == ActionType.SWIPE_DOWN:
         device.swipe_down()
+    elif t == ActionType.SWIPE_LEFT:
+        device.swipe_left()
+    elif t == ActionType.SWIPE_RIGHT:
+        device.swipe_right()
+    elif t == ActionType.LONG_PRESS:
+        device.long_press(action.x, action.y)
+    elif t == ActionType.DRAG:
+        device.swipe(action.x, action.y, action.x2, action.y2, duration_ms=500)
     elif t == ActionType.BACK:
         device.press_back()
     elif t == ActionType.HOME:
@@ -597,6 +715,7 @@ def run_all_tests(
     device_serial: str = "emulator-5554",
     output_dir: str | Path | None = None,
     clear_data: bool = False,
+    verbose: bool = False,
 ) -> RunSummary:
     """Run all tests from a tests.json file.
 
@@ -609,6 +728,7 @@ def run_all_tests(
         clear_data: If True, clear app data once before all tests.
             Useful for a clean first run, but means the first test
             must navigate through any onboarding flow.
+        verbose: If True, print real-time events to the console.
 
     Returns:
         RunSummary with all test results.
@@ -646,11 +766,31 @@ def run_all_tests(
     out_path = Path(output_dir) if output_dir else None
     started_at = datetime.now(timezone.utc).isoformat()
 
-    trace = RunTrace()
+    console = ConsoleLogger(enabled=verbose)
+    trace = RunTrace(on_add=console.on_trace_entry)
+
+    # Extract PR metadata from tests.json for verbose header
+    pr_number = data.get("pr_number")
+    pr_title = data.get("pr_title")
+    console.run_start(
+        pr_number=pr_number,
+        pr_title=pr_title,
+        model=config.model,
+        provider=config.provider,
+        device_serial=device_serial,
+        test_count=len(test_cases),
+        app_package=app_package,
+    )
+
+    # Auto-discover setup agents from bundled + project + user directories
+    registry = AgentRegistry.auto_discover(project_path=Path.cwd())
 
     results: list[TestRunResult] = []
     for tc in test_cases:
-        result = execute_test(tc, device, config, app_package, out_path, trace=trace)
+        result = execute_test(
+            tc, device, config, app_package, out_path,
+            trace=trace, console=console, registry=registry,
+        )
         results.append(result)
         logger.info("  %s: %s", result.test_id, result.status)
 

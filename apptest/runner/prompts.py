@@ -14,6 +14,10 @@ Available actions (return exactly one):
 - type: Type text into the currently focused field. Requires "text".
 - swipe_up: Scroll the screen up (to see content below).
 - swipe_down: Scroll the screen down (to see content above).
+- swipe_left: Swipe horizontally left (for carousels, tabs).
+- swipe_right: Swipe horizontally right.
+- long_press: Long-press at coordinates (for context menus, selection mode). Requires "x" and "y".
+- drag: Drag from one point to another (for reordering, sliders). Requires "x", "y", "x2", "y2".
 - back: Press the Android back button.
 - enter: Press the enter/return key.
 - wait: Wait for the screen to update (use when content is loading).
@@ -40,7 +44,10 @@ not search/submit buttons. Do NOT tap them.
 dismiss it quickly so you can proceed to the actual app.
 
 Response format:
-{{"action": "<action_type>", "x": 0, "y": 0, "text": "", "reasoning": "brief explanation"}}
+{{"action": "<action_type>", "x": 0, "y": 0, "x2": 0, "y2": 0, "text": "", "reasoning": "brief explanation"}}
+
+For drag actions, "x"/"y" is the start point and "x2"/"y2" is the end point.
+For all other actions, "x2" and "y2" can be omitted.
 """
 
 VERIFICATION_PROMPT = """\

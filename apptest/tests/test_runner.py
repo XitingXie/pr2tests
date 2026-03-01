@@ -198,9 +198,8 @@ class TestExecuteTest:
     def test_full_test_pass(self, mock_decide, mock_verify):
         from apptest.runner.executor import execute_test
 
-        # Step 1: Open app (launch keyword)
-        # Step 2: Tap something → LLM returns done
-        # Step 3: Verify → passes
+        # "Open the app" is now auto-skipped by step_parser,
+        # so only 2 steps remain: tap + verify
         mock_decide.return_value = Action(
             action_type=ActionType.DONE, reasoning="step complete",
         )
@@ -223,7 +222,8 @@ class TestExecuteTest:
 
         assert result.test_id == "test_001"
         assert result.status == "passed"
-        assert len(result.steps) == 3
+        assert len(result.steps) == 2
+        # Framework launches app automatically (not via step)
         device.launch_app.assert_called_once_with("org.wikipedia")
 
     @patch("apptest.runner.executor.verify_step")
@@ -252,8 +252,8 @@ class TestExecuteTest:
         result = execute_test(test_case, device, config, "org.wikipedia")
 
         assert result.status == "failed"
-        # Step 3 should NOT have been executed
-        assert len(result.steps) == 2
+        # "Open the app" is skipped, so only verify step runs (and fails)
+        assert len(result.steps) == 1
         assert "button not found" in result.failure_reason
 
 

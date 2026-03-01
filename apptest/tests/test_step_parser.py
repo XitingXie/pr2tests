@@ -9,16 +9,16 @@ class TestParseTestSteps:
     """Parsing numbered steps from descriptions."""
 
     def test_basic_numbered_steps(self):
+        # "Open the app" is auto-skipped by the framework (see _SKIP_KEYWORDS)
         desc = "1. Open the app\n2. Navigate to Search\n3. Type 'hello'"
         steps = parse_test_steps(desc)
-        assert len(steps) == 3
-        assert steps[0] == ParsedStep(index=1, text="Open the app", is_verification=False)
-        assert steps[1] == ParsedStep(index=2, text="Navigate to Search", is_verification=False)
-        assert steps[2] == ParsedStep(index=3, text="Type 'hello'", is_verification=False)
+        assert len(steps) == 2
+        assert steps[0] == ParsedStep(index=2, text="Navigate to Search", is_verification=False)
+        assert steps[1] == ParsedStep(index=3, text="Type 'hello'", is_verification=False)
 
     def test_verification_steps_detected(self):
         desc = (
-            "1. Open the app\n"
+            "1. Navigate to home\n"
             "2. Verify the home screen is displayed\n"
             "3. Check that the logo is visible\n"
             "4. Assert search bar exists"
@@ -48,10 +48,17 @@ class TestParseTestSteps:
         assert all(s.is_verification for s in steps)
 
     def test_single_step(self):
-        desc = "1. Open the app"
+        # "Open the app" is skipped; use a non-skip step
+        desc = "1. Tap the menu button"
         steps = parse_test_steps(desc)
         assert len(steps) == 1
-        assert steps[0].text == "Open the app"
+        assert steps[0].text == "Tap the menu button"
+
+    def test_skip_open_app(self):
+        # "Open the app" is auto-skipped by the framework
+        desc = "1. Open the app"
+        steps = parse_test_steps(desc)
+        assert len(steps) == 0
 
     def test_no_numbers_fallback(self):
         desc = "Open the app and navigate to settings"
@@ -66,16 +73,18 @@ class TestParseTestSteps:
         assert parse_test_steps("   ") == []
 
     def test_mixed_formatting_with_extra_whitespace(self):
+        # "Open the app" is skipped
         desc = "  1.  Open the app  \n  2.  Tap on menu  \n  3.  Verify settings page  "
         steps = parse_test_steps(desc)
-        assert len(steps) == 3
-        assert steps[0].text == "Open the app"
-        assert steps[2].is_verification is True
+        assert len(steps) == 2
+        assert steps[0].text == "Tap on menu"
+        assert steps[1].is_verification is True
 
     def test_multiline_with_blank_lines(self):
+        # "Open the app" is skipped
         desc = "1. Open the app\n\n2. Navigate to Search\n\n3. Type query"
         steps = parse_test_steps(desc)
-        assert len(steps) == 3
+        assert len(steps) == 2
 
     def test_steps_preserve_order(self):
         desc = "3. Third step\n1. First step\n2. Second step"

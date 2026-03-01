@@ -4,12 +4,15 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import click
+
 from ..config import LLMConfig
-from .prompts import LOGIC_ONLY_ADDENDUM, TEST_GENERATION_PROMPT
+from .prompts import AGENT_CAPABILITIES, LOGIC_ONLY_ADDENDUM, TEST_GENERATION_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,7 @@ class TestCase:
     covers: str                 # what aspect of the change
     change_type: str            # new_feature|bug_fix|regression|error_case|edge_case
     priority: str               # high|medium|low
+    preconditions: list = field(default_factory=list)  # structured dicts or legacy strings
     test_data: dict = field(default_factory=dict)
 
 
@@ -34,6 +38,9 @@ class GenerationResult:
     pr_ref: str
     change_summary: dict        # counts per category
     tests: list[TestCase] = field(default_factory=list)
+    pr_number: int | None = None
+    pr_title: str | None = None
+    pr_url: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -162,12 +169,25 @@ def _parse_test_cases(raw_text: str) -> list[TestCase]:
         if not isinstance(item, dict):
             continue
         try:
+            raw_pre = item.get("preconditions", [])
+            if not isinstance(raw_pre, list):
+                raw_pre = []
+            # Accept both structured dicts and legacy strings
+            preconditions: list = []
+            for p in raw_pre:
+                if isinstance(p, dict):
+                    preconditions.append(p)
+                elif isinstance(p, str):
+                    preconditions.append(
+                        {"agent": "unknown", "action": "note", "params": {"text": p}}
+                    )
             cases.append(TestCase(
                 id=str(item.get("id", f"test_{len(cases) + 1:03d}")),
                 description=str(item.get("description", "")),
                 covers=str(item.get("covers", "")),
                 change_type=str(item.get("change_type", "unknown")),
                 priority=str(item.get("priority", "medium")),
+                preconditions=preconditions,
                 test_data=item.get("test_data", {}) if isinstance(item.get("test_data"), dict) else {},
             ))
         except (TypeError, ValueError) as e:
@@ -175,17 +195,21 @@ def _parse_test_cases(raw_text: str) -> list[TestCase]:
     return cases
 
 
-def generate_tests(analysis: dict, config: LLMConfig) -> GenerationResult:
+def generate_tests(analysis: dict, config: LLMConfig, verbose: bool = False) -> GenerationResult:
     """Generate test cases from analysis output using an LLM.
 
     Args:
         analysis: Parsed analysis.json dict.
         config: LLM configuration (provider, model, api_key).
+        verbose: If True, print LLM request/response timing to console.
 
     Returns:
         GenerationResult with generated test cases.
     """
     pr_ref = analysis.get("diff_ref", "unknown")
+    pr_number = analysis.get("pr_number")
+    pr_title = analysis.get("pr_title")
+    pr_url = analysis.get("pr_url")
     change_summary = {
         "ui": len(analysis.get("ui_changes", [])),
         "logic": len(analysis.get("logic_changes", [])),
@@ -201,20 +225,42 @@ def generate_tests(analysis: dict, config: LLMConfig) -> GenerationResult:
             pr_ref=pr_ref,
             change_summary=change_summary,
             tests=[],
+            pr_number=pr_number,
+            pr_title=pr_title,
+            pr_url=pr_url,
         )
+
+    # Build system prompt with optional addenda
+    from ..agents import AgentRegistry
 
     prompt = TEST_GENERATION_PROMPT
     if change_summary["ui"] == 0 and change_summary["logic"] > 0:
         prompt += LOGIC_ONLY_ADDENDUM
 
+    # Inject agent capabilities so the LLM outputs structured preconditions
+    registry = AgentRegistry.auto_discover()
+    prompt += AGENT_CAPABILITIES.format(
+        agent_descriptions=registry.prompt_description(),
+    )
+
+    # Include PR title in context if available
+    pr_label = f"PR: {pr_ref}"
+    if pr_title:
+        pr_label = f"PR #{pr_number}: {pr_title}" if pr_number else f"PR: {pr_title}"
     user_message = (
         f"App: {analysis.get('app_name', 'Unknown')} ({analysis.get('app_package', '')})\n"
-        f"PR: {pr_ref}\n\n"
+        f"{pr_label}\n\n"
         f"{changes_text}"
     )
 
     # Call the LLM
+    if verbose:
+        click.echo(f"  [LLM] Sending request to {config.provider}/{config.model}...")
+    call_start = time.monotonic()
     raw_response = _call_llm(user_message, prompt, config)
+    call_ms = int((time.monotonic() - call_start) * 1000)
+    if verbose:
+        click.echo(f"  [LLM] Response received ({call_ms}ms, {len(raw_response)} chars)")
 
     # Parse response
     tests = _parse_test_cases(raw_response)
@@ -224,6 +270,9 @@ def generate_tests(analysis: dict, config: LLMConfig) -> GenerationResult:
         pr_ref=pr_ref,
         change_summary=change_summary,
         tests=tests,
+        pr_number=pr_number,
+        pr_title=pr_title,
+        pr_url=pr_url,
     )
 
 
@@ -259,13 +308,16 @@ def _call_moonshot(user_message: str, system_prompt: str, config: LLMConfig) -> 
 
     client = OpenAI(api_key=api_key, base_url="https://api.moonshot.ai/v1")
 
+    # Kimi K2.5 only allows temperature=1; other Moonshot models accept 0-1.
+    temp = 1.0 if "k2.5" in config.model.lower() else 0.3
+
     response = client.chat.completions.create(
         model=config.model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ],
-        temperature=0.3,
+        temperature=temp,
     )
     return response.choices[0].message.content
 

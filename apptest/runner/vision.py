@@ -84,6 +84,8 @@ def decide_action(
         action_type=action_type,
         x=int(data.get("x", 0)),
         y=int(data.get("y", 0)),
+        x2=int(data.get("x2", 0)),
+        y2=int(data.get("y2", 0)),
         text=str(data.get("text", "")),
         reasoning=str(data.get("reasoning", "")),
     )
@@ -196,10 +198,13 @@ the element centers.
 Return ONLY a JSON object in this format:
 {"action": "<action_type>", "coords": [x, y], "text": "", "reasoning": "short explanation"}
 
-action_type must be one of: tap, type, swipe_up, swipe_down, back, enter, wait, done.
+action_type must be one of: tap, type, swipe_up, swipe_down, swipe_left, swipe_right, long_press, drag, back, enter, wait, done.
 - tap: tap the element at coords.
 - type: type text into the currently focused field (coords ignored, include "text").
-- swipe_up / swipe_down: scroll the screen.
+- swipe_up / swipe_down: scroll the screen vertically.
+- swipe_left / swipe_right: swipe the screen horizontally (for carousels, tabs).
+- long_press: long-press at coords (for context menus, selection mode).
+- drag: drag from coords to coords2 (for reordering, sliders). Include "coords2": [x2, y2].
 - back: press Android back button.
 - enter: press Enter/Return key.
 - wait: wait for the screen to update.
@@ -286,10 +291,20 @@ def _decide_action_moonshot(
     else:
         px_x, px_y = 0, 0
 
+    # Drag endpoint (coords2)
+    coords2 = data.get("coords2", [0, 0])
+    if isinstance(coords2, list) and len(coords2) >= 2:
+        px_x2 = int(coords2[0] / 1000 * width)
+        px_y2 = int(coords2[1] / 1000 * height)
+    else:
+        px_x2, px_y2 = 0, 0
+
     return Action(
         action_type=action_type,
         x=px_x,
         y=px_y,
+        x2=px_x2,
+        y2=px_y2,
         text=str(data.get("text", "")),
         reasoning=str(data.get("reasoning", "")),
     )
