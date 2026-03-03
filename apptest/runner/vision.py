@@ -8,7 +8,14 @@ import re
 
 from ..config import LLMConfig
 from ..llm_retry import retry_llm_call
-from .prompts import ACTION_PROMPT, VERIFICATION_PROMPT
+from .prompts import (
+    ACTION_PROMPT,
+    GROUNDING_PROMPT,
+    GROUNDING_SYSTEM_KIMI,
+    GROUNDING_USER_KIMI,
+    REASONING_PROMPT,
+    VERIFICATION_PROMPT,
+)
 from .schemas import Action, ActionType
 
 logger = logging.getLogger(__name__)
@@ -21,6 +28,9 @@ _GOOGLE_PROVIDERS = ("google", "gemini")
 _MOONSHOT_PROVIDERS = ("moonshot", "kimi")
 
 _MOONSHOT_BASE_URL = "https://api.moonshot.ai/v1"
+
+# Actions that require coordinate grounding (Stage 2 of hybrid pipeline).
+_COORD_ACTIONS = {"tap", "long_press", "drag"}
 
 
 def _get_client(api_key: str, provider: str = "google"):
@@ -52,6 +62,13 @@ def decide_action(
     trace_entries: list | None = None,
 ) -> Action:
     """Send screenshot + step to the LLM, return the next Action to take."""
+    # Hybrid pipeline: reasoning model + grounding model
+    if config.grounding_provider:
+        return _decide_action_hybrid(
+            screenshot_png, step_text, width, height,
+            actions_so_far, config, device_context, trace_entries,
+        )
+
     provider = config.provider.lower()
 
     if provider in _MOONSHOT_PROVIDERS:
@@ -391,6 +408,186 @@ def _verify_step_moonshot(
     reasoning = str(data.get("reasoning", ""))
 
     return passed, confidence, reasoning
+
+
+# ---------------------------------------------------------------------------
+# Hybrid pipeline: reasoning model (Stage 1) + grounding model (Stage 2)
+# ---------------------------------------------------------------------------
+
+
+def _make_grounding_config(config: LLMConfig) -> LLMConfig:
+    """Create an LLMConfig for the grounding model from the parent config."""
+    return LLMConfig(
+        provider=config.grounding_provider,
+        model=config.grounding_model,
+        api_key=config.grounding_api_key,
+    )
+
+
+def _decide_action_hybrid(
+    screenshot_png: bytes,
+    step_text: str,
+    width: int,
+    height: int,
+    actions_so_far: int,
+    config: LLMConfig,
+    device_context: str,
+    trace_entries: list | None,
+) -> Action:
+    """Two-stage hybrid pipeline: reasoning model decides WHAT, grounding model decides WHERE."""
+
+    # --- Stage 1: Reasoning (action + target description) ---
+    reasoning_prompt = REASONING_PROMPT.format(
+        step_text=step_text,
+        width=width,
+        height=height,
+        actions_so_far=actions_so_far,
+        device_context=f"Device context: {device_context}\n" if device_context else "",
+    )
+
+    raw_reasoning = _call_vision(reasoning_prompt, screenshot_png, config)
+    data = _parse_json(raw_reasoning)
+
+    action_str = data.get("action", "wait")
+    try:
+        action_type = ActionType(action_str)
+    except ValueError:
+        logger.warning("Unknown action type '%s', defaulting to wait", action_str)
+        action_type = ActionType.WAIT
+
+    target = str(data.get("target", ""))
+    target2 = str(data.get("target2", ""))
+    reasoning = str(data.get("reasoning", ""))
+    text = str(data.get("text", ""))
+
+    # --- Stage 2: Grounding (coordinates) — only for coordinate actions ---
+    px_x, px_y, px_x2, px_y2 = 0, 0, 0, 0
+    raw_grounding = ""
+
+    if action_str in _COORD_ACTIONS and target:
+        grounding_config = _make_grounding_config(config)
+        grounding_prompt_text = ""
+        px_x, px_y, raw_grounding, grounding_prompt_text = _call_grounding(
+            screenshot_png, action_str, target, width, height, grounding_config,
+        )
+
+        # For drag, ground the second target as well
+        if action_type == ActionType.DRAG and target2:
+            px_x2, px_y2, raw_grounding_2, gp2 = _call_grounding(
+                screenshot_png, action_str, target2, width, height, grounding_config,
+            )
+            raw_grounding += "\n---\n" + raw_grounding_2
+            grounding_prompt_text += "\n---\n" + gp2
+
+    # --- Trace ---
+    if trace_entries is not None:
+        entry = {"prompt": reasoning_prompt, "raw_response": raw_reasoning}
+        trace_entries.append(entry)
+        if raw_grounding:
+            trace_entries.append({
+                "prompt": grounding_prompt_text if grounding_prompt_text else "(grounding)",
+                "raw_response": raw_grounding,
+            })
+
+    return Action(
+        action_type=action_type,
+        x=px_x,
+        y=px_y,
+        x2=px_x2,
+        y2=px_y2,
+        text=text,
+        reasoning=reasoning,
+    )
+
+
+def _call_grounding(
+    screenshot_png: bytes,
+    action_type: str,
+    target: str,
+    width: int,
+    height: int,
+    config: LLMConfig,
+) -> tuple[int, int, str, str]:
+    """Route grounding call to Kimi or generic provider.
+
+    Returns (px_x, px_y, raw_response, prompt_text).
+    """
+    provider = config.provider.lower()
+    if provider in _MOONSHOT_PROVIDERS:
+        return _call_grounding_kimi(screenshot_png, action_type, target, width, height, config)
+    return _call_grounding_generic(screenshot_png, action_type, target, width, height, config)
+
+
+@retry_llm_call
+def _call_grounding_kimi(
+    screenshot_png: bytes,
+    action_type: str,
+    target: str,
+    width: int,
+    height: int,
+    config: LLMConfig,
+) -> tuple[int, int, str, str]:
+    """Kimi-specific grounding with 0-1000 normalized coordinates."""
+    client = _get_moonshot_client(config)
+    b64_image = base64.b64encode(screenshot_png).decode("utf-8")
+
+    user_text = GROUNDING_USER_KIMI.format(action_type=action_type, target=target)
+
+    response = _chat_completion_with_retry(
+        client,
+        model=config.model,
+        messages=[
+            {"role": "system", "content": GROUNDING_SYSTEM_KIMI},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:image/png;base64,{b64_image}",
+                    }},
+                    {"type": "text", "text": user_text},
+                ],
+            },
+        ],
+        max_tokens=1024,
+        temperature=0.6,
+        response_format={"type": "json_object"},
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+
+    raw = response.choices[0].message.content
+    data = _parse_json(raw)
+
+    coords = data.get("coords", [0, 0])
+    if isinstance(coords, list) and len(coords) >= 2:
+        px_x = int(coords[0] / 1000 * width)
+        px_y = int(coords[1] / 1000 * height)
+    else:
+        px_x, px_y = 0, 0
+
+    prompt_text = f"[system] {GROUNDING_SYSTEM_KIMI}\n\n[user] {user_text}"
+    return px_x, px_y, raw, prompt_text
+
+
+def _call_grounding_generic(
+    screenshot_png: bytes,
+    action_type: str,
+    target: str,
+    width: int,
+    height: int,
+    config: LLMConfig,
+) -> tuple[int, int, str, str]:
+    """Generic grounding via Google/OpenAI with pixel coordinates."""
+    prompt = GROUNDING_PROMPT.format(
+        action_type=action_type, target=target, width=width, height=height,
+    )
+
+    raw = _call_vision(prompt, screenshot_png, config)
+    data = _parse_json(raw)
+
+    px_x = int(data.get("x", 0))
+    px_y = int(data.get("y", 0))
+
+    return px_x, px_y, raw, prompt
 
 
 def _parse_json(raw: str) -> dict:

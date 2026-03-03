@@ -178,8 +178,8 @@ class ADBDevice:
     # ---- App management ----
 
     def install(self, apk_path: str) -> None:
-        """Install an APK (replace if exists)."""
-        self._run_check(["install", "-r", apk_path], timeout=120)
+        """Install an APK (replace if exists, allow version downgrade)."""
+        self._run_check(["install", "-r", "-d", apk_path], timeout=120)
 
     def uninstall(self, package: str) -> None:
         """Uninstall an app. No error if not installed."""

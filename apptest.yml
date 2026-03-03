@@ -9,9 +9,17 @@ source:
   strings_file: "app/src/main/res/values/strings.xml"
   manifest: "app/src/main/AndroidManifest.xml"
 
+build:
+  repo_url: "https://github.com/wikimedia/apps-android-wikipedia.git"
+  variant: "alphaDebug"
+  test_package: "org.wikipedia.alpha"
+
 llm:
-  provider: moonshot
-  model: kimi-k2.5
+  provider: google
+  model: gemini-2.0-flash
+  grounding:
+    provider: moonshot
+    model: kimi-k2.5
 
 # report:
 #   trigger_mode: manual     # "manual", "daily", "count"

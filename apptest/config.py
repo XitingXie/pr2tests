@@ -31,6 +31,16 @@ class LLMConfig:
     provider: str = "moonshot"
     model: str = "kimi-k2.5"
     api_key: str = ""
+    grounding_provider: str = ""   # empty = single-model (no hybrid)
+    grounding_model: str = ""
+    grounding_api_key: str = ""    # falls back to env var per provider
+
+
+@dataclass
+class BuildConfig:
+    repo_url: str = ""              # git clone URL
+    variant: str = "debug"          # Gradle build variant
+    test_package: str = ""          # APK package name (if empty → app.package)
 
 
 @dataclass
@@ -47,6 +57,7 @@ class Config:
     app: AppConfig
     source: SourceConfig
     llm: LLMConfig = field(default_factory=LLMConfig)
+    build: BuildConfig = field(default_factory=BuildConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
 
 
@@ -127,6 +138,14 @@ def load_config(config_path: str | Path) -> Config:
             provider=raw.get("llm", {}).get("provider", "moonshot"),
             model=raw.get("llm", {}).get("model", "kimi-k2.5"),
             api_key=raw.get("llm", {}).get("api_key", ""),
+            grounding_provider=raw.get("llm", {}).get("grounding", {}).get("provider", ""),
+            grounding_model=raw.get("llm", {}).get("grounding", {}).get("model", ""),
+            grounding_api_key=raw.get("llm", {}).get("grounding", {}).get("api_key", ""),
+        ),
+        build=BuildConfig(
+            repo_url=raw.get("build", {}).get("repo_url", ""),
+            variant=raw.get("build", {}).get("variant", "debug"),
+            test_package=raw.get("build", {}).get("test_package", ""),
         ),
         report=ReportConfig(
             trigger_mode=raw.get("report", {}).get("trigger_mode", "manual"),

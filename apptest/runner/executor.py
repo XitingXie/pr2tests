@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..agents import AgentRegistry
-from ..config import LLMConfig
+from ..config import BuildConfig, LLMConfig
 from .adb import ADBDevice
 from .schemas import (
     Action,
@@ -34,6 +34,107 @@ VERIFICATION_FALLBACK_MODEL = "kimi-k2.5"
 
 _LAUNCH_KEYWORDS = ("open the app", "launch the app", "start the app")
 
+# Precondition agent/action pairs that should only run once per test run,
+# not repeated for every individual test case.
+_RUN_LEVEL_AGENTS = {
+    ("build", "checkout_and_build"),
+    ("app", "install"),
+}
+
+
+def _is_run_level_precondition(precondition: dict) -> bool:
+    """Return True if this precondition should be handled at run level, not per-test."""
+    agent = precondition.get("agent", "")
+    action = precondition.get("action", "")
+    return (agent, action) in _RUN_LEVEL_AGENTS
+
+
+def _run_level_setup(
+    test_data: dict,
+    test_cases: list[dict],
+    registry: AgentRegistry,
+    device: "ADBDevice",
+    app_package: str,
+    apk_path: str | None = None,
+    build_config: BuildConfig | None = None,
+    console: "ConsoleLogger | None" = None,
+) -> bool:
+    """Run build/install preconditions once before all tests.
+
+    Derives build/install from build_config (apptest.yml) and PR metadata
+    in test_data (tests.json). Falls back to scanning the first test case
+    for legacy LLM-generated build/install preconditions.
+
+    Returns True if any run-level preconditions were handled.
+    """
+    if not test_cases:
+        return False
+
+    # If the caller already provided an APK, skip build — just install it.
+    if apk_path:
+        run_level: list[dict] = [
+            {"agent": "app", "action": "install"},
+        ]
+    elif build_config and build_config.repo_url:
+        # Derive commit from PR metadata in tests.json (pr_ref: "base..head")
+        pr_ref = test_data.get("pr_ref", "")
+        commit = ""
+        if ".." in pr_ref:
+            commit = pr_ref.split("..")[-1].strip()
+
+        # Derive local repo_path from the cached clone location
+        # (mirrors _ensure_local_repo in cli.py: .apptest/repos/<owner>/<repo>/)
+        clean = build_config.repo_url.rstrip("/").removesuffix(".git")
+        parts = clean.split("/")
+        repo_path = str(Path(".apptest") / "repos" / parts[-2] / parts[-1])
+
+        run_level = [
+            {
+                "agent": "build",
+                "action": "checkout_and_build",
+                "params": {
+                    "repo_path": repo_path,
+                    "repo_url": build_config.repo_url,
+                    "commit": commit,
+                    "build_variant": build_config.variant,
+                },
+            },
+            {"agent": "app", "action": "install"},
+        ]
+    else:
+        # Legacy fallback: scan the first test case for build/install
+        first_preconditions = test_cases[0].get("preconditions", [])
+        run_level = [
+            p for p in first_preconditions
+            if isinstance(p, dict) and _is_run_level_precondition(p)
+        ]
+
+    if not run_level:
+        return False
+
+    shared_context = {"app_package": app_package}
+    if apk_path:
+        shared_context["apk_path"] = apk_path
+    if build_config:
+        if build_config.repo_url:
+            shared_context.setdefault("repo_url", build_config.repo_url)
+        if build_config.variant:
+            shared_context.setdefault("build_variant", build_config.variant)
+
+    logger.info("Running build/install preconditions once for all tests...")
+    if console:
+        console.log("Running build/install preconditions once for all tests...")
+        for rl in run_level:
+            console.log(f"  → {rl.get('agent')}.{rl.get('action')} params={rl.get('params', {})}")
+
+    setup_log = registry.dispatch(run_level, device, shared_context)
+    for entry in setup_log:
+        logger.info("  Run-level setup: %s", entry)
+        if console:
+            console.log(entry)
+
+    return True
+
 
 def execute_test(
     test_case: dict,
@@ -45,6 +146,8 @@ def execute_test(
     console: ConsoleLogger | None = None,
     registry: AgentRegistry | None = None,
     apk_path: str | None = None,
+    build_config: BuildConfig | None = None,
+    skip_run_level: bool = False,
 ) -> TestRunResult:
     """Execute a single test case on the device.
 
@@ -58,6 +161,8 @@ def execute_test(
         console: Optional ConsoleLogger for real-time output.
         registry: Optional AgentRegistry for dispatching structured preconditions.
         apk_path: Optional path to APK file for install preconditions.
+        build_config: Optional BuildConfig with repo_url, variant for build agent.
+        skip_run_level: If True, skip build/install preconditions (already handled).
 
     Returns:
         TestRunResult with per-step details.
@@ -83,10 +188,19 @@ def execute_test(
     structured = [p for p in preconditions if isinstance(p, dict)]
     legacy = [p for p in preconditions if isinstance(p, str)]
 
+    # Filter out run-level preconditions (build/install) if already handled
+    if skip_run_level:
+        structured = [p for p in structured if not _is_run_level_precondition(p)]
+
     if structured and registry:
         shared_context = {"app_package": app_package}
         if apk_path:
             shared_context["apk_path"] = apk_path
+        if build_config:
+            if build_config.repo_url:
+                shared_context.setdefault("repo_url", build_config.repo_url)
+            if build_config.variant:
+                shared_context.setdefault("build_variant", build_config.variant)
         setup_log = registry.dispatch(
             structured, device, shared_context,
         )
@@ -331,15 +445,19 @@ def _run_action_step(
         call_duration = _elapsed_ms(call_start)
 
         if trace is not None and capture:
+            # Hybrid pipeline may emit multiple trace entries (reasoning + grounding);
+            # join them with --- separators for a single TraceEntry.
+            prompt_parts = [c["prompt"] for c in capture]
+            response_parts = [c["raw_response"] for c in capture]
             trace.add(TraceEntry(
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 call_type="action",
                 test_id=test_id,
                 step_index=step_index,
                 step_text=step_text,
-                prompt=capture[0]["prompt"],
+                prompt="\n---\n".join(prompt_parts),
                 screenshot_b64=base64.b64encode(png).decode("ascii"),
-                raw_response=capture[0]["raw_response"],
+                raw_response="\n---\n".join(response_parts),
                 parsed_result=f"{action.action_type.value}: {action.reasoning}",
                 device_context=device_context,
                 duration_ms=call_duration,
@@ -722,6 +840,7 @@ def run_all_tests(
     apk_path: str | None = None,
     clear_data: bool = False,
     verbose: bool = False,
+    build_config: BuildConfig | None = None,
 ) -> RunSummary:
     """Run all tests from a tests.json file.
 
@@ -735,6 +854,7 @@ def run_all_tests(
             Useful for a clean first run, but means the first test
             must navigate through any onboarding flow.
         verbose: If True, print real-time events to the console.
+        build_config: Optional BuildConfig with repo_url, variant for build agent.
 
     Returns:
         RunSummary with all test results.
@@ -791,12 +911,21 @@ def run_all_tests(
     # Auto-discover setup agents from bundled + project + user directories
     registry = AgentRegistry.auto_discover(project_path=Path.cwd())
 
+    # Run build/install preconditions ONCE before the test loop.
+    # Derived from build_config (apptest.yml) + PR metadata in tests.json.
+    run_level_done = _run_level_setup(
+        data, test_cases, registry, device, app_package,
+        apk_path=apk_path, build_config=build_config,
+        console=console,
+    )
+
     results: list[TestRunResult] = []
     for tc in test_cases:
         result = execute_test(
             tc, device, config, app_package, out_path,
             trace=trace, console=console, registry=registry,
-            apk_path=apk_path,
+            apk_path=apk_path, build_config=build_config,
+            skip_run_level=run_level_done,
         )
         results.append(result)
         logger.info("  %s: %s", result.test_id, result.status)
