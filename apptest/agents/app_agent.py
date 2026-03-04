@@ -26,6 +26,13 @@ class AppAgent(SetupAgent):
         elif action == "install":
             apk = params.get("apk_path", self.apk_path)
             if apk:
+                # Uninstall first to avoid INSTALL_FAILED_VERSION_DOWNGRADE
+                # when the PR branch has a lower version code than what's on device.
+                if pkg:
+                    try:
+                        device.uninstall(pkg)
+                    except Exception:
+                        pass  # OK if not installed
                 device.install(apk)
                 return f"installed {apk}"
             return "no APK path provided"

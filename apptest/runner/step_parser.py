@@ -12,6 +12,7 @@ _VERIFICATION_PREFIXES = (
 _SKIP_KEYWORDS = (
     "fresh install", "install the app", "reinstall",
     "open the app", "launch the app", "start the app",
+    "relaunch the app", "reopen the app", "restart the app",
 )
 
 _NUMBERED_STEP = re.compile(r"^\s*(\d+)\.\s+(.+)", re.MULTILINE)

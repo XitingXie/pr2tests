@@ -32,7 +32,10 @@ VERIFY_WAIT_SECS = 1.0
 STUCK_THRESHOLD = 3  # identical screenshots before recovery
 VERIFICATION_FALLBACK_MODEL = "kimi-k2.5"
 
-_LAUNCH_KEYWORDS = ("open the app", "launch the app", "start the app")
+_LAUNCH_KEYWORDS = (
+    "open the app", "launch the app", "start the app",
+    "relaunch the app", "reopen the app", "restart the app",
+)
 
 # Precondition agent/action pairs that should only run once per test run,
 # not repeated for every individual test case.
@@ -182,6 +185,12 @@ def execute_test(
         device.force_stop(app_package)
     except RuntimeError as e:
         logger.warning("Failed to stop app: %s", e)
+
+    # Ensure soft keyboard is enabled (may get reset by clear_data or locale changes).
+    try:
+        device.ensure_keyboard_visible()
+    except RuntimeError:
+        pass
 
     # Dispatch structured preconditions to setup agents
     preconditions = test_case.get("preconditions", [])

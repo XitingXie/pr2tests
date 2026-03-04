@@ -22,15 +22,24 @@ the PR does not change.
 ## Important
 - The "description" field must contain ONLY user-facing actions (tap, type, scroll, navigate) \
 and verifications. The framework launches the app automatically after preconditions run.
-- Any setup requirements (app installation, clean app data, specific device config, \
+- Any setup requirements (clean app data, specific device config, \
 specific language, A/B test group) must go in "preconditions", NOT as numbered steps in "description".
-- Start the description from the first meaningful user action (e.g., "Navigate to Settings", \
+- Always start the description with "1. Relaunch the app" as the first step. \
+The framework handles this automatically (force-stop + fresh launch), so the step is \
+skipped at runtime, but it ensures clean state and makes the test readable.
+- Follow with the first meaningful user action as step 2 (e.g., "Navigate to Settings", \
 "Tap the search bar").
-- For testing PR changes, preconditions should ensure the device runs the build with those changes. \
-Use the build agent to checkout the commit and build the APK, then install it. Example chain:
-  1. `build.checkout_and_build` (with commit and repo_url from the Build Context section)
-  2. `app.install` (reads apk_path from build output automatically)
-  3. `app.clear_data` (when fresh first-launch state is needed)
+
+## Run-level vs test-level preconditions
+- **Build and install are handled ONCE per run** by the framework automatically. \
+Do NOT include `build.checkout_and_build` or `app.install` in individual test preconditions. \
+The framework reads the Build Context and runs them before the first test.
+- **Test-level preconditions** are things specific to an individual test: \
+`app.clear_data` (only when fresh first-launch state is needed, e.g. onboarding flows), \
+`device.set_locale`, or string notes for manual setup.
+- Most tests do NOT need `app.clear_data`. Only include it when the test explicitly \
+requires a first-launch state (onboarding, first-run prompts). Normal feature tests \
+should work with the app already set up.
 
 ## Output Format
 Return a JSON array of test cases. Each test case has:
@@ -38,9 +47,6 @@ Return a JSON array of test cases. Each test case has:
 {{
   "id": "test_001",
   "preconditions": [
-    {{"agent": "build", "action": "checkout_and_build", "params": {{"commit": "<from Build Context>", "repo_url": "<from Build Context>"}}}},
-    {{"agent": "app", "action": "install"}},
-    {{"agent": "app", "action": "clear_data"}},
     {{"agent": "device", "action": "set_locale", "params": {{"locale": "el"}}}}
   ],
   "description": "Step-by-step user actions, one line per step:\\n1. Navigate to Search\\n2. Type 'example'\\n3. Verify results appear",
@@ -66,21 +72,22 @@ test steps run. When a test requires specific device/app state, specify it in \
 ## Precondition Format
 Each precondition is a JSON object with "agent", "action", and optional "params":
 ```json
-{{"agent": "build", "action": "checkout_and_build", "params": {{"commit": "af457ff", "repo_url": "https://github.com/owner/repo.git"}}}}
-{{"agent": "app", "action": "install"}}
 {{"agent": "app", "action": "clear_data"}}
 {{"agent": "device", "action": "set_locale", "params": {{"locale": "el"}}}}
 ```
 
-Preconditions execute in order. Agents share context — build produces `apk_path`, \
-app.install reads it automatically.
+Preconditions execute in order before the test starts.
 
-**Always start with `build.checkout_and_build`** using the commit and repo_url from \
-the Build Context section. Then `app.install` to install the built APK. \
-Add `app.clear_data` after install when the test needs a fresh first-launch state \
-(e.g., onboarding flows, first-run prompts).
+**Do NOT include `build.checkout_and_build` or `app.install`** in preconditions — \
+the framework handles building and installing the APK once at the start of the run.
 
-Only use agents listed above. If a requirement can't be handled by any agent \
+Only include test-specific preconditions:
+- `app.clear_data` — only when a test needs first-launch/clean state (onboarding, etc.)
+- `device.set_locale` — when a test needs a specific language
+- String notes — for manual setup that no agent can handle
+
+Most tests need NO preconditions at all. Only use agents listed above. \
+If a requirement can't be handled by any agent \
 (e.g., "user must be in A/B test group"), put it as a string note instead.
 """
 

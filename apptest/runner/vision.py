@@ -1,4 +1,4 @@
-"""Vision integration for screenshot analysis (Gemini, OpenAI, Moonshot Kimi)."""
+"""Vision integration for screenshot analysis (Gemini, OpenAI, Anthropic Claude, Moonshot Kimi)."""
 
 import base64
 import json
@@ -11,8 +11,6 @@ from ..llm_retry import retry_llm_call
 from .prompts import (
     ACTION_PROMPT,
     GROUNDING_PROMPT,
-    GROUNDING_SYSTEM_KIMI,
-    GROUNDING_USER_KIMI,
     REASONING_PROMPT,
     VERIFICATION_PROMPT,
 )
@@ -25,6 +23,7 @@ _client_cache: dict[str, object] = {}
 
 _OPENAI_PROVIDERS = ("openai",)
 _GOOGLE_PROVIDERS = ("google", "gemini")
+_ANTHROPIC_PROVIDERS = ("anthropic", "claude")
 _MOONSHOT_PROVIDERS = ("moonshot", "kimi")
 
 _MOONSHOT_BASE_URL = "https://api.moonshot.ai/v1"
@@ -45,6 +44,9 @@ def _get_client(api_key: str, provider: str = "google"):
         elif provider in _OPENAI_PROVIDERS:
             from openai import OpenAI
             _client_cache[cache_key] = OpenAI(api_key=api_key)
+        elif provider in _ANTHROPIC_PROVIDERS:
+            import anthropic
+            _client_cache[cache_key] = anthropic.Anthropic(api_key=api_key)
         else:
             from google import genai
             _client_cache[cache_key] = genai.Client(api_key=api_key)
@@ -143,11 +145,13 @@ def verify_step(
 
 
 def _call_vision(prompt: str, image_png: bytes, config: LLMConfig) -> str:
-    """Multimodal call with image + text prompt. Supports Google and OpenAI."""
+    """Multimodal call with image + text prompt. Supports Google, OpenAI, and Anthropic."""
     provider = config.provider.lower()
 
     if provider in _OPENAI_PROVIDERS:
         return _call_vision_openai(prompt, image_png, config)
+    if provider in _ANTHROPIC_PROVIDERS:
+        return _call_vision_anthropic(prompt, image_png, config)
     return _call_vision_google(prompt, image_png, config)
 
 
@@ -163,8 +167,9 @@ def _call_vision_google(prompt: str, image_png: bytes, config: LLMConfig) -> str
     client = _get_client(api_key, provider="google")
     image_part = genai.types.Part.from_bytes(data=image_png, mime_type="image/png")
 
+    model_id = config.model if config.model.startswith("models/") else f"models/{config.model}"
     response = client.models.generate_content(
-        model=config.model,
+        model=model_id,
         contents=[image_part, prompt],
         config=genai.types.GenerateContentConfig(temperature=0.1),
     )
@@ -195,6 +200,35 @@ def _call_vision_openai(prompt: str, image_png: bytes, config: LLMConfig) -> str
         temperature=0.1,
     )
     return response.choices[0].message.content
+
+
+@retry_llm_call
+def _call_vision_anthropic(prompt: str, image_png: bytes, config: LLMConfig) -> str:
+    """Anthropic Claude multimodal call."""
+    api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY environment variable is not set.")
+
+    client = _get_client(api_key, provider="anthropic")
+    b64_image = base64.b64encode(image_png).decode("utf-8")
+
+    response = client.messages.create(
+        model=config.model,
+        max_tokens=4096,
+        temperature=0.1,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": b64_image,
+                }},
+                {"type": "text", "text": prompt},
+            ],
+        }],
+    )
+    return response.content[0].text
 
 
 def _get_moonshot_client(config: LLMConfig):
@@ -469,12 +503,16 @@ def _decide_action_hybrid(
         grounding_prompt_text = ""
         px_x, px_y, raw_grounding, grounding_prompt_text = _call_grounding(
             screenshot_png, action_str, target, width, height, grounding_config,
+            step_text=step_text, actions_so_far=actions_so_far,
+            device_context=device_context,
         )
 
         # For drag, ground the second target as well
         if action_type == ActionType.DRAG and target2:
             px_x2, px_y2, raw_grounding_2, gp2 = _call_grounding(
                 screenshot_png, action_str, target2, width, height, grounding_config,
+                step_text=step_text, actions_so_far=actions_so_far,
+                device_context=device_context,
             )
             raw_grounding += "\n---\n" + raw_grounding_2
             grounding_prompt_text += "\n---\n" + gp2
@@ -507,6 +545,9 @@ def _call_grounding(
     width: int,
     height: int,
     config: LLMConfig,
+    step_text: str = "",
+    actions_so_far: int = 0,
+    device_context: str = "",
 ) -> tuple[int, int, str, str]:
     """Route grounding call to Kimi or generic provider.
 
@@ -514,11 +555,14 @@ def _call_grounding(
     """
     provider = config.provider.lower()
     if provider in _MOONSHOT_PROVIDERS:
-        return _call_grounding_kimi(screenshot_png, action_type, target, width, height, config)
+        return _call_grounding_kimi(
+            screenshot_png, action_type, target, width, height, config,
+            step_text=step_text, actions_so_far=actions_so_far,
+            device_context=device_context,
+        )
     return _call_grounding_generic(screenshot_png, action_type, target, width, height, config)
 
 
-@retry_llm_call
 def _call_grounding_kimi(
     screenshot_png: bytes,
     action_type: str,
@@ -526,18 +570,31 @@ def _call_grounding_kimi(
     width: int,
     height: int,
     config: LLMConfig,
+    step_text: str = "",
+    actions_so_far: int = 0,
+    device_context: str = "",
 ) -> tuple[int, int, str, str]:
-    """Kimi-specific grounding with 0-1000 normalized coordinates."""
+    """Kimi grounding using the proven action prompt + reasoning hint.
+
+    Reuses _KIMI_ACTION_SYSTEM (which Kimi is tuned for) and adds
+    the reasoning model's target description as a hint so Kimi knows
+    exactly which element to locate.
+    """
     client = _get_moonshot_client(config)
     b64_image = base64.b64encode(screenshot_png).decode("utf-8")
 
-    user_text = GROUNDING_USER_KIMI.format(action_type=action_type, target=target)
+    user_text = _KIMI_ACTION_USER.format(
+        step_text=step_text,
+        actions_so_far=actions_so_far,
+        device_context=f"Device context: {device_context}\n" if device_context else "",
+    )
+    user_text += f"\nHint from reasoning model: {action_type} on \"{target}\""
 
     response = _chat_completion_with_retry(
         client,
         model=config.model,
         messages=[
-            {"role": "system", "content": GROUNDING_SYSTEM_KIMI},
+            {"role": "system", "content": _KIMI_ACTION_SYSTEM},
             {
                 "role": "user",
                 "content": [
@@ -548,8 +605,9 @@ def _call_grounding_kimi(
                 ],
             },
         ],
-        max_tokens=1024,
+        max_tokens=4096,
         temperature=0.6,
+        top_p=0.95,
         response_format={"type": "json_object"},
         extra_body={"thinking": {"type": "disabled"}},
     )
@@ -564,7 +622,7 @@ def _call_grounding_kimi(
     else:
         px_x, px_y = 0, 0
 
-    prompt_text = f"[system] {GROUNDING_SYSTEM_KIMI}\n\n[user] {user_text}"
+    prompt_text = f"[system] {_KIMI_ACTION_SYSTEM}\n\n[user] {user_text}"
     return px_x, px_y, raw, prompt_text
 
 
