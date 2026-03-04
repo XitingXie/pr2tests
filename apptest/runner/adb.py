@@ -1,12 +1,96 @@
 """ADB device wrapper for Android emulator/device control."""
 
 import logging
+import os
+import shutil
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def start_fresh_emulator(
+    avd: str | None = None,
+    timeout: int = 120,
+) -> str:
+    """Start a fresh emulator on an available port.
+
+    Args:
+        avd: AVD name to launch. If None, picks the first from ``emulator -list-avds``.
+        timeout: Seconds to wait for the emulator to boot.
+
+    Returns:
+        ADB serial string, e.g. ``"emulator-5556"``.
+    """
+    # Find emulator binary
+    emulator_bin = shutil.which("emulator")
+    if not emulator_bin:
+        sdk_path = Path.home() / "Library" / "Android" / "sdk" / "emulator" / "emulator"
+        if sdk_path.exists():
+            emulator_bin = str(sdk_path)
+        else:
+            raise RuntimeError(
+                "emulator binary not found. Ensure Android SDK emulator is on PATH "
+                "or installed at ~/Library/Android/sdk/emulator/emulator"
+            )
+
+    # Pick AVD
+    if not avd:
+        result = subprocess.run(
+            [emulator_bin, "-list-avds"],
+            capture_output=True, text=True, timeout=10,
+        )
+        avds = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if not avds:
+            raise RuntimeError("No AVDs found. Create one with: avdmanager create avd ...")
+        avd = avds[0]
+        logger.info("Auto-selected AVD: %s", avd)
+
+    # Find an available port (even ports: 5554, 5556, 5558, ...)
+    port = _find_available_emulator_port()
+    serial = f"emulator-{port}"
+    logger.info("Starting emulator %s on port %d (AVD=%s)", serial, port, avd)
+
+    # Launch emulator in background
+    subprocess.Popen(
+        [emulator_bin, "-avd", avd, "-port", str(port), "-no-boot-anim"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Wait for boot
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            result = subprocess.run(
+                ["adb", "-s", serial, "shell", "getprop", "sys.boot_completed"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.stdout.strip() == "1":
+                logger.info("Emulator %s booted successfully", serial)
+                return serial
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        time.sleep(2)
+
+    raise RuntimeError(f"Emulator {serial} did not boot within {timeout}s")
+
+
+def _find_available_emulator_port(start: int = 5554, end: int = 5600) -> int:
+    """Scan even ports and return the first one with no running emulator."""
+    for port in range(start, end, 2):
+        try:
+            result = subprocess.run(
+                ["adb", "-s", f"emulator-{port}", "get-state"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode != 0 or "device" not in result.stdout:
+                return port
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return port
+    raise RuntimeError(f"No available emulator port in range {start}-{end}")
 
 
 class ADBDevice:

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ..agents import AgentRegistry
 from ..config import BuildConfig, LLMConfig
-from .adb import ADBDevice
+from .adb import ADBDevice, start_fresh_emulator
 from .schemas import (
     Action,
     ActionType,
@@ -878,6 +878,9 @@ def run_all_tests(
     test_cases = data.get("tests", [])
     if not test_cases:
         raise ValueError(f"No tests found in {tests_path}")
+
+    # Start a fresh emulator so we don't collide with existing ones
+    device_serial = start_fresh_emulator()
 
     device = ADBDevice(serial=device_serial)
     device.wait_for_device()
