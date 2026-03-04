@@ -62,6 +62,7 @@ def decide_action(
     config: LLMConfig,
     device_context: str = "",
     trace_entries: list | None = None,
+    nav_context: str = "",
 ) -> Action:
     """Send screenshot + step to the LLM, return the next Action to take."""
     # Hybrid pipeline: reasoning model + grounding model
@@ -69,6 +70,7 @@ def decide_action(
         return _decide_action_hybrid(
             screenshot_png, step_text, width, height,
             actions_so_far, config, device_context, trace_entries,
+            nav_context=nav_context,
         )
 
     provider = config.provider.lower()
@@ -467,6 +469,7 @@ def _decide_action_hybrid(
     config: LLMConfig,
     device_context: str,
     trace_entries: list | None,
+    nav_context: str = "",
 ) -> Action:
     """Two-stage hybrid pipeline: reasoning model decides WHAT, grounding model decides WHERE."""
 
@@ -477,6 +480,7 @@ def _decide_action_hybrid(
         height=height,
         actions_so_far=actions_so_far,
         device_context=f"Device context: {device_context}\n" if device_context else "",
+        nav_context=nav_context,
     )
 
     raw_reasoning = _call_vision(reasoning_prompt, screenshot_png, config)

@@ -467,7 +467,7 @@ def generate(analysis_path: str, output_path: str, config_path: str, verbose: bo
 
     # Generate tests
     click.echo("[2/3] Calling LLM to generate test steps...")
-    result = generate_tests(analysis, config.llm, verbose=verbose)
+    result = generate_tests(analysis, config.llm, verbose=verbose, build_config=config.build)
 
     # Write output
     click.echo("[3/3] Writing results...")
@@ -618,6 +618,459 @@ def run(
         click.echo(f"  [{icon}] {r.test_id}")
         if r.failure_reason:
             click.echo(f"         {r.failure_reason}")
+
+
+def _fetch_pr_metadata(pr_url: str) -> dict:
+    """Fetch PR metadata from GitHub using `gh` CLI or URL parsing.
+
+    Returns dict with keys: number, title, head_sha, base_sha, repo_url, diff_ref.
+    """
+    import subprocess
+
+    meta: dict = {"pr_url": pr_url}
+
+    # Parse owner/repo/number from URL
+    # Format: https://github.com/{owner}/{repo}/pull/{number}
+    parts = pr_url.rstrip("/").split("/")
+    pull_idx = next((i for i, p in enumerate(parts) if p == "pull"), -1)
+    if pull_idx < 3 or pull_idx + 1 >= len(parts):
+        raise click.BadParameter(f"Cannot parse PR URL: {pr_url}")
+
+    owner_repo = "/".join(parts[pull_idx - 2 : pull_idx])
+    pr_number = int(parts[pull_idx + 1])
+    repo_url = "/".join(parts[: pull_idx]) + ".git"
+
+    meta["number"] = pr_number
+    meta["repo_url"] = repo_url
+
+    # Try gh CLI for rich metadata (title, commits)
+    try:
+        gh_out = subprocess.run(
+            ["gh", "pr", "view", str(pr_number),
+             "--repo", owner_repo,
+             "--json", "title,headRefOid,baseRefOid,mergeCommit"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if gh_out.returncode == 0:
+            import json as _json
+            data = _json.loads(gh_out.stdout)
+            meta["title"] = data.get("title", "")
+            head = data.get("headRefOid", "")
+            base = data.get("baseRefOid", "")
+            if head:
+                meta["head_sha"] = head
+                short = head[:7]
+                meta["diff_ref"] = f"{short}^..{short}" if not base else f"{base[:7]}..{short}"
+            if base:
+                meta["base_sha"] = base
+        return meta
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Fallback: just use the PR number as diff ref placeholder
+    meta["title"] = ""
+    meta["diff_ref"] = f"PR #{pr_number}"
+    return meta
+
+
+def _has_commit(repo: Path, sha: str) -> bool:
+    """Check if a commit SHA exists in the local repo."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "-e", sha],
+            cwd=repo,
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
+def _ensure_local_repo(
+    repo_url: str,
+    head_sha: str,
+    base_sha: str | None = None,
+) -> Path:
+    """Clone or update a cached copy of the remote repo.
+
+    Returns the path to the local clone with *head_sha* checked out.
+    Cache location: .apptest/repos/<owner>/<repo>/
+    """
+    import subprocess
+
+    # Parse owner/repo from URL like https://github.com/owner/repo.git
+    clean = repo_url.rstrip("/").removesuffix(".git")
+    parts = clean.split("/")
+    owner = parts[-2]
+    repo_name = parts[-1]
+
+    cache_dir = Path(".apptest") / "repos" / owner / repo_name
+    clone_exists = (cache_dir / ".git").exists()
+
+    if clone_exists:
+        click.echo(f"  Reusing cached clone at {cache_dir}")
+        subprocess.run(
+            ["git", "fetch", "--depth", "500", "origin"],
+            cwd=cache_dir,
+            check=True,
+            timeout=300,
+        )
+    else:
+        click.echo(f"  Cloning {repo_url} → {cache_dir}")
+        cache_dir.parent.mkdir(parents=True, exist_ok=True)
+        # Use https URL without .git suffix for broader compatibility
+        clone_url = clean if not repo_url.endswith(".git") else repo_url
+        subprocess.run(
+            ["git", "clone", "--depth", "500", clone_url, str(cache_dir)],
+            check=True,
+            timeout=300,
+        )
+
+    # Ensure both SHAs are reachable (shallow clones may miss them)
+    for sha in filter(None, [head_sha, base_sha]):
+        if not _has_commit(cache_dir, sha):
+            click.echo(f"  Fetching commit {sha[:7]}...")
+            subprocess.run(
+                ["git", "fetch", "--depth", "500", "origin", sha],
+                cwd=cache_dir,
+                capture_output=True,
+                timeout=120,
+            )
+
+    # Checkout head SHA so the source tree matches the PR state
+    click.echo(f"  Checking out {head_sha[:7]}...")
+    subprocess.run(
+        ["git", "checkout", head_sha],
+        cwd=cache_dir,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+
+    return cache_dir.resolve()
+
+
+@main.command()
+@click.option(
+    "--pr",
+    "pr_input",
+    default=None,
+    help="GitHub PR URL (e.g. https://github.com/owner/repo/pull/123). "
+         "Auto-detects diff, title, repo URL.",
+)
+@click.option(
+    "--diff",
+    "diff_ref",
+    default=None,
+    help="Git diff reference (e.g. HEAD~1..HEAD). Overrides --pr auto-detection.",
+)
+@click.option(
+    "--repo",
+    "repo_path",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Path to the git repository (auto-cloned when using --pr).",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True),
+    default="apptest.yml",
+    help="Path to apptest.yml config file.",
+)
+@click.option(
+    "--output",
+    "output_dir",
+    type=click.Path(),
+    default=None,
+    help="Output directory (default: auto-created under .apptest/runs/).",
+)
+@click.option(
+    "--device",
+    "device_serial",
+    default="emulator-5554",
+    help="ADB device serial (default: emulator-5554).",
+)
+@click.option(
+    "--package",
+    "package_override",
+    default=None,
+    help="Override app package name from config.",
+)
+@click.option(
+    "--apk",
+    "apk_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to pre-built APK (skips build agent).",
+)
+@click.option(
+    "--skip-run",
+    is_flag=True,
+    default=False,
+    help="Skip test execution (only analyze + generate).",
+)
+@click.option(
+    "--skip-report",
+    is_flag=True,
+    default=False,
+    help="Skip report generation.",
+)
+@click.option(
+    "-v", "--verbose",
+    is_flag=True,
+    default=False,
+    help="Verbose output for all steps.",
+)
+def pipeline(
+    pr_input: str | None,
+    diff_ref: str | None,
+    repo_path: str | None,
+    config_path: str,
+    output_dir: str | None,
+    device_serial: str,
+    package_override: str | None,
+    apk_path: str | None,
+    skip_run: bool,
+    skip_report: bool,
+    verbose: bool,
+):
+    """Run the full pipeline: analyze → generate → run → report.
+
+    \b
+    Examples:
+      # From a GitHub PR URL (auto-detects everything):
+      apptest pipeline --pr https://github.com/owner/repo/pull/123 -v
+
+      # From a local diff:
+      apptest pipeline --diff "HEAD~1..HEAD" -v
+
+      # With pre-built APK (skips build agent):
+      apptest pipeline --pr https://github.com/owner/repo/pull/123 --apk ./app.apk -v
+
+      # Only analyze + generate (no device needed):
+      apptest pipeline --pr https://github.com/owner/repo/pull/123 --skip-run --skip-report -v
+    """
+    import json
+
+    user_specified_repo = repo_path is not None
+    repo = Path(repo_path).resolve() if repo_path else Path(".").resolve()
+    config = load_config(config_path)
+    app_package = package_override or config.build.test_package or config.app.package
+
+    # Resolve PR metadata
+    pr_number = None
+    pr_title = None
+    pr_url = None
+
+    if pr_input:
+        click.echo(f"Fetching PR metadata from {pr_input}...")
+        try:
+            meta = _fetch_pr_metadata(pr_input)
+        except Exception as e:
+            click.echo(f"Error fetching PR metadata: {e}", err=True)
+            raise SystemExit(1)
+
+        pr_number = meta.get("number")
+        pr_title = meta.get("title", "")
+        pr_url = meta.get("pr_url", pr_input)
+        if not diff_ref:
+            diff_ref = meta.get("diff_ref", "HEAD~1..HEAD")
+        click.echo(f"  PR #{pr_number}: {pr_title}")
+        click.echo(f"  Diff: {diff_ref}")
+        click.echo(f"  Repo: {meta.get('repo_url', '')}")
+
+        # Auto-clone remote repo when commits aren't available locally
+        if not user_specified_repo and meta.get("repo_url"):
+            head_sha = meta.get("head_sha", "")
+            if head_sha and not _has_commit(repo, head_sha):
+                click.echo(f"  Commits not found locally — auto-cloning remote repo...")
+                repo = _ensure_local_repo(
+                    repo_url=meta["repo_url"],
+                    head_sha=head_sha,
+                    base_sha=meta.get("base_sha"),
+                )
+
+    if not diff_ref:
+        diff_ref = "HEAD~1..HEAD"
+
+    # Determine output directory
+    if output_dir:
+        out_dir = Path(output_dir)
+    else:
+        out_dir = create_run_dir(config.app.name)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    analysis_path = out_dir / "analysis.json"
+    tests_path = out_dir / "tests.json"
+
+    click.echo(f"{'=' * 60}")
+    click.echo(f"  AppTest Pipeline — {config.app.name}")
+    click.echo(f"{'=' * 60}")
+    click.echo(f"  Diff:    {diff_ref}")
+    click.echo(f"  Repo:    {repo}")
+    click.echo(f"  Output:  {out_dir}")
+    click.echo(f"  LLM:     {config.llm.provider}/{config.llm.model}")
+    click.echo(f"  Device:  {device_serial}")
+    if pr_number:
+        click.echo(f"  PR:      #{pr_number} {pr_title or ''}")
+    click.echo()
+
+    # ── Step 1: Analyze ──────────────────────────────────────────
+    click.echo(f"[1/4] Analyzing PR diff...")
+
+    profile = load_effective_profile(repo)
+    if profile is None:
+        click.echo("  No profile found — running init automatically...")
+        scanner_config = {
+            "source_root": config.source.root,
+            "exclude_dirs": config.source.exclude_dirs,
+        }
+        auto = scan_project(repo, scanner_config)
+        save_profile(repo, {"auto": auto})
+        profile = load_effective_profile(repo)
+
+    changed_files = parse_diff(repo, diff_ref, filter_relevant=False)
+    click.echo(f"  Found {len(changed_files)} changed files")
+
+    if not changed_files:
+        click.echo("No changed files. Nothing to do.")
+        return
+
+    manifest_path = repo / config.source.manifest
+    activities = []
+    if manifest_path.exists():
+        activities = parse_manifest(manifest_path, namespace=config.app.package)
+
+    analysis_result = build_context(
+        changed_files=changed_files,
+        activities=activities,
+        repo_path=repo,
+        source_root=config.source.root,
+        layouts_dir=config.source.layouts_dir,
+        strings_file=config.source.strings_file,
+        exclude_dirs=config.source.exclude_dirs,
+        app_name=config.app.name,
+        app_package=config.app.package,
+        diff_ref=diff_ref,
+        profile=profile,
+        pr_number=pr_number,
+        pr_title=pr_title,
+        pr_url=pr_url,
+    )
+
+    write_analysis(analysis_result, out_dir)
+    click.echo(f"  {len(analysis_result.ui_changes)} UI, "
+               f"{len(analysis_result.logic_changes)} logic, "
+               f"{len(analysis_result.test_changes)} test, "
+               f"{len(analysis_result.infra_changes)} infra changes")
+
+    # ── Step 1.5: Navigation graph ────────────────────────────────
+    nav_data: dict = {}
+    if config.nav_graph_path:
+        click.echo(f"\n  Generating navigation graph...")
+        from .nav_graph import generate_nav_graph
+
+        changed_paths = [cf.path for cf in changed_files]
+        nav_data = generate_nav_graph(repo, config.nav_graph_path, changed_paths)
+        if nav_data:
+            nav_graph_path = out_dir / "nav_graph.json"
+            with open(nav_graph_path, "w") as f:
+                json.dump(nav_data, f, indent=2)
+            click.echo(f"  Nav graph saved ({len(nav_data)} keys)")
+        else:
+            click.echo(f"  Nav graph generation returned no data (non-blocking)")
+
+    # ── Step 2: Generate tests ───────────────────────────────────
+    click.echo(f"\n[2/4] Generating test steps via {config.llm.provider}/{config.llm.model}...")
+
+    with open(analysis_path) as f:
+        analysis_data = json.load(f)
+
+    gen_result = generate_tests(
+        analysis_data, config.llm, verbose=verbose, build_config=config.build,
+        nav_data=nav_data if nav_data else None,
+    )
+    write_tests(gen_result, tests_path)
+    click.echo(f"  Generated {len(gen_result.tests)} test(s)")
+    for tc in gen_result.tests:
+        click.echo(f"    [{tc.priority}] {tc.id}: {tc.covers}")
+
+    if not gen_result.tests:
+        click.echo("No tests generated. Stopping pipeline.")
+        return
+
+    # ── Step 3: Run tests ────────────────────────────────────────
+    if skip_run:
+        click.echo(f"\n[3/4] Skipping test execution (--skip-run)")
+    else:
+        click.echo(f"\n[3/4] Running tests on {device_serial}...")
+        from .runner.executor import run_all_tests
+
+        try:
+            summary = run_all_tests(
+                tests_path=str(tests_path),
+                config=config.llm,
+                app_package=app_package,
+                device_serial=device_serial,
+                output_dir=str(out_dir),
+                apk_path=apk_path,
+                clear_data=False,
+                verbose=verbose,
+                build_config=config.build,
+            )
+        except (RuntimeError, ValueError) as e:
+            click.echo(f"  Error during test execution: {e}", err=True)
+            click.echo("  Continuing to report step...")
+            summary = None
+
+        if summary:
+            click.echo(f"  Passed: {summary.passed}/{summary.total_tests}")
+            for r in summary.results:
+                icon = "PASS" if r.status == "passed" else "FAIL"
+                click.echo(f"    [{icon}] {r.test_id}")
+                if r.failure_reason:
+                    click.echo(f"           {r.failure_reason}")
+
+    # ── Step 4: Report ───────────────────────────────────────────
+    if skip_report:
+        click.echo(f"\n[4/4] Skipping report generation (--skip-report)")
+    else:
+        click.echo(f"\n[4/4] Generating report...")
+        try:
+            pr_summaries = collect_prs_manual(repo, diff_ref)
+            trigger = TriggerInfo(
+                mode="manual",
+                commit_range=diff_ref,
+                description=f"Pipeline run for {diff_ref}",
+            )
+            version_info = get_version_info(repo)
+            report_data = build_report(
+                repo, config, pr_summaries, trigger, version_info, run_dir=out_dir,
+            )
+            report_dir = Path(config.report.output_dir) / report_data.report_id
+            html_path = write_report_html(report_data, report_dir)
+            write_report_json(report_data, report_dir)
+            add_to_index(
+                output_dir=Path(config.report.output_dir),
+                report=report_data,
+                report_html_path=f"{report_data.report_id}/report.html",
+                report_json_path=f"{report_data.report_id}/report.json",
+                max_reports=config.report.retention,
+                app_name=config.app.name,
+            )
+            click.echo(f"  Report: {html_path}")
+        except Exception as e:
+            click.echo(f"  Report generation failed: {e}", err=True)
+
+    # ── Summary ──────────────────────────────────────────────────
+    click.echo(f"\n{'=' * 60}")
+    click.echo(f"  Pipeline complete")
+    click.echo(f"  Output: {out_dir}")
+    click.echo(f"{'=' * 60}")
 
 
 @main.command()

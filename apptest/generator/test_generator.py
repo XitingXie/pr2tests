@@ -11,7 +11,7 @@ from pathlib import Path
 
 import click
 
-from ..config import LLMConfig
+from ..config import BuildConfig, LLMConfig
 from ..llm_retry import retry_llm_call
 from .prompts import AGENT_CAPABILITIES, LOGIC_ONLY_ADDENDUM, TEST_GENERATION_PROMPT
 
@@ -42,6 +42,7 @@ class GenerationResult:
     pr_number: int | None = None
     pr_title: str | None = None
     pr_url: str | None = None
+    nav_graph: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -256,13 +257,21 @@ def _parse_test_cases(raw_text: str) -> list[TestCase]:
     return cases
 
 
-def generate_tests(analysis: dict, config: LLMConfig, verbose: bool = False) -> GenerationResult:
+def generate_tests(
+    analysis: dict,
+    config: LLMConfig,
+    verbose: bool = False,
+    build_config: BuildConfig | None = None,
+    nav_data: dict | None = None,
+) -> GenerationResult:
     """Generate test cases from analysis output using an LLM.
 
     Args:
         analysis: Parsed analysis.json dict.
         config: LLM configuration (provider, model, api_key).
         verbose: If True, print LLM request/response timing to console.
+        build_config: Optional BuildConfig with repo_url, variant from apptest.yml.
+        nav_data: Optional navigation graph data for context injection.
 
     Returns:
         GenerationResult with generated test cases.
@@ -309,24 +318,34 @@ def generate_tests(analysis: dict, config: LLMConfig, verbose: bool = False) -> 
     if pr_title:
         pr_label = f"PR #{pr_number}: {pr_title}" if pr_number else f"PR: {pr_title}"
 
-    # Extract repo URL and commit for build agent context
-    repo_url = analysis.get("repo_url", "")
-    commit = ""
+    # Extract repo URL and commit for build agent context.
+    # Priority: build_config (apptest.yml) > analysis metadata > PR URL derivation.
+    repo_url = ""
+    build_variant = ""
+    if build_config:
+        repo_url = build_config.repo_url
+        build_variant = build_config.variant
+    if not repo_url:
+        repo_url = analysis.get("repo_url", "")
     if not repo_url and pr_url:
         # Fallback: derive from PR URL (https://github.com/{owner}/{repo}/pull/{number})
         parts = pr_url.rstrip("/").split("/")
         pull_idx = next((i for i, p in enumerate(parts) if p == "pull"), -1)
         if pull_idx >= 3:
             repo_url = "/".join(parts[:pull_idx]) + ".git"
+
+    commit = ""
     if pr_ref and ".." in pr_ref:
         # diff_ref format: "af457ff^..af457ff" or "abc123..def456"
         commit = pr_ref.split("..")[-1].strip()
 
     build_context = ""
-    if repo_url or commit:
+    if repo_url or commit or build_variant:
         build_context = "\n## Build Context\n"
         if repo_url:
             build_context += f"Repository: {repo_url}\n"
+        if build_variant:
+            build_context += f"Build variant: {build_variant}\n"
         if commit:
             build_context += f"Commit: {commit}\n"
         build_context += (
@@ -334,11 +353,18 @@ def generate_tests(analysis: dict, config: LLMConfig, verbose: bool = False) -> 
             "the APK with the PR changes.\n"
         )
 
+    # Format navigation map context if available
+    nav_context = ""
+    if nav_data:
+        from ..nav_graph import format_nav_context
+        nav_context = format_nav_context(nav_data)
+
     user_message = (
         f"App: {analysis.get('app_name', 'Unknown')} ({analysis.get('app_package', '')})\n"
         f"{pr_label}\n"
         f"{build_context}\n"
-        f"{changes_text}"
+        + (f"{nav_context}\n\n" if nav_context else "")
+        + f"{changes_text}"
     )
 
     # Call the LLM
@@ -361,6 +387,7 @@ def generate_tests(analysis: dict, config: LLMConfig, verbose: bool = False) -> 
         pr_number=pr_number,
         pr_title=pr_title,
         pr_url=pr_url,
+        nav_graph=nav_data if nav_data else None,
     )
 
 

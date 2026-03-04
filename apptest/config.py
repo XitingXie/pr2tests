@@ -59,6 +59,7 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     build: BuildConfig = field(default_factory=BuildConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
+    nav_graph_path: str = ""  # path to Android-navigation-graph project
 
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{(\w+)\}")
@@ -154,4 +155,5 @@ def load_config(config_path: str | Path) -> Config:
             retention=raw.get("report", {}).get("retention", 30),
             include_mock_tests=raw.get("report", {}).get("include_mock_tests", True),
         ),
+        nav_graph_path=raw.get("nav_graph_path", ""),
     )

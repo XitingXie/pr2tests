@@ -58,6 +58,7 @@ Current test step: {step_text}
 Screen resolution: {width}x{height}
 Actions taken so far for this step: {actions_so_far}
 {device_context}
+{nav_context}
 
 Available actions (return exactly one):
 - tap: Tap a UI element. Requires "target" (description of the element to tap). Do NOT include coordinates.
@@ -90,6 +91,7 @@ After typing, use the "enter" action ONLY if you need to submit/search.
 not search/submit buttons. Do NOT tap them.
 - If you see a setup wizard, onboarding, or welcome screen, tap "Skip" or "Get started" to \
 dismiss it quickly so you can proceed to the actual app.
+- If a Navigation Map is provided, follow the exact navigation path to the target screen.
 
 Response format:
 {{"action": "<action_type>", "target": "", "target2": "", "text": "", "reasoning": "brief explanation"}}

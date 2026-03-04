@@ -151,6 +151,7 @@ def execute_test(
     apk_path: str | None = None,
     build_config: BuildConfig | None = None,
     skip_run_level: bool = False,
+    nav_context: str = "",
 ) -> TestRunResult:
     """Execute a single test case on the device.
 
@@ -279,7 +280,7 @@ def execute_test(
             sr = _run_action_step(
                 step.index, step.text, device, config,
                 app_package, screen_w, screen_h, output_dir, test_id,
-                trace=trace, console=console,
+                trace=trace, console=console, nav_context=nav_context,
             )
 
         sr.duration_ms = _elapsed_ms(step_start)
@@ -320,6 +321,7 @@ def _run_action_step(
     test_id: str,
     trace: RunTrace | None = None,
     console: ConsoleLogger | None = None,
+    nav_context: str = "",
 ) -> StepResult:
     """Execute an action step by looping: screenshot → LLM → action."""
     if console is None:
@@ -441,6 +443,7 @@ def _run_action_step(
                 png, step_text, screen_w, screen_h, len(actions), config,
                 device_context=device_context,
                 trace_entries=capture,
+                nav_context=nav_context,
             )
         except Exception as e:
             logger.error("  Vision call failed: %s", e)
@@ -928,6 +931,15 @@ def run_all_tests(
         console=console,
     )
 
+    # Load nav graph from tests.json and format once for all tests
+    nav_context = ""
+    nav_graph_data = data.get("nav_graph")
+    if nav_graph_data:
+        from ..nav_graph import format_nav_context
+        nav_context = format_nav_context(nav_graph_data)
+        if nav_context and verbose:
+            logger.info("Nav context loaded (%d chars)", len(nav_context))
+
     results: list[TestRunResult] = []
     for tc in test_cases:
         result = execute_test(
@@ -935,6 +947,7 @@ def run_all_tests(
             trace=trace, console=console, registry=registry,
             apk_path=apk_path, build_config=build_config,
             skip_run_level=run_level_done,
+            nav_context=nav_context,
         )
         results.append(result)
         logger.info("  %s: %s", result.test_id, result.status)

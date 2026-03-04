@@ -14,6 +14,8 @@ build:
   variant: "alphaDebug"
   test_package: "org.wikipedia.alpha"
 
+nav_graph_path: "/Users/kevinxie/Documents/github/Android-navigation-graph"
+
 llm:
   provider: anthropic
   model: claude-sonnet-4-6
