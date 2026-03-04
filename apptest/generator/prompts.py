@@ -15,7 +15,9 @@ implements that. Do NOT assume side effects or implicit behavior that is not in 
 - If a bug fix is described, write a regression test that reproduces the original bug.
 - For new features, test the feature as coded — do not invent negative tests for behavior \
 the PR does not change.
-- If a Navigation Map is provided, use it to write precise navigation steps.
+- If Navigation Routes are provided, each test MUST follow the exact route from launcher to the \
+target screen. Include every intermediate screen as a navigation step. If the route passes through \
+an onboarding/welcome screen, include a step to dismiss it (tap 'Skip' or 'Get started').
 - Keep steps concise but unambiguous — another tester should be able to follow them exactly.
 - Include any specific test data (search terms, input values, etc.) needed to reproduce.
 - Prioritize: high = must-test before release, medium = should-test, low = nice-to-test.

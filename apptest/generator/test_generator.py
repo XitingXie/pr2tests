@@ -353,11 +353,18 @@ def generate_tests(
             "the APK with the PR changes.\n"
         )
 
-    # Format navigation map context if available
+    # Format navigation route context if available (RAG: only relevant routes)
     nav_context = ""
     if nav_data:
-        from ..nav_graph import format_nav_context
-        nav_context = format_nav_context(nav_data)
+        from ..nav_graph import format_nav_context, format_route_context
+        target_screens = [
+            s.get("screen_name")
+            for s in nav_data.get("affected_screens", [])
+            if isinstance(s, dict)
+        ]
+        nav_context = format_route_context(nav_data, target_screens)
+        if not nav_context:
+            nav_context = format_nav_context(nav_data)  # fallback
 
     user_message = (
         f"App: {analysis.get('app_name', 'Unknown')} ({analysis.get('app_package', '')})\n"

@@ -564,7 +564,7 @@ def run(
     from .runner.schemas import to_execution_results
 
     config = load_config(config_path)
-    app_package = package_override or config.app.package
+    app_package = package_override or config.build.test_package or config.app.package
 
     if model_override:
         config.llm.model = model_override
@@ -972,10 +972,18 @@ def pipeline(
     nav_data: dict = {}
     if config.nav_graph_path:
         click.echo(f"\n  Generating navigation graph...")
-        from .nav_graph import generate_nav_graph
+        from .nav_graph import generate_full_nav_graph, generate_nav_graph
 
         changed_paths = [cf.path for cf in changed_files]
         nav_data = generate_nav_graph(repo, config.nav_graph_path, changed_paths)
+
+        # Also generate full graph for route-based context (RAG)
+        full_graph = generate_full_nav_graph(repo, config.nav_graph_path)
+        if full_graph:
+            nav_data["full_graph"] = full_graph
+            click.echo(f"  Full nav graph: {len(full_graph.get('screens', []))} screens, "
+                       f"{len(full_graph.get('navigation_edges', []))} edges")
+
         if nav_data:
             nav_graph_path = out_dir / "nav_graph.json"
             with open(nav_graph_path, "w") as f:

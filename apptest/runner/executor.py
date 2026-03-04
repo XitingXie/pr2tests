@@ -879,9 +879,6 @@ def run_all_tests(
     if not test_cases:
         raise ValueError(f"No tests found in {tests_path}")
 
-    # Start a fresh emulator so we don't collide with existing ones
-    device_serial = start_fresh_emulator()
-
     device = ADBDevice(serial=device_serial)
     device.wait_for_device()
 
@@ -938,8 +935,17 @@ def run_all_tests(
     nav_context = ""
     nav_graph_data = data.get("nav_graph")
     if nav_graph_data:
-        from ..nav_graph import format_nav_context
-        nav_context = format_nav_context(nav_graph_data)
+        from ..nav_graph import format_nav_context, format_route_context
+        # Extract target screens from test cases for route-based context
+        target_screens: list[str] = []
+        for tc in test_cases:
+            # Try to extract screen names from test covers/description
+            covers = tc.get("covers", "")
+            if covers:
+                target_screens.append(covers)
+        nav_context = format_route_context(nav_graph_data, target_screens)
+        if not nav_context:
+            nav_context = format_nav_context(nav_graph_data)  # fallback
         if nav_context and verbose:
             logger.info("Nav context loaded (%d chars)", len(nav_context))
 
